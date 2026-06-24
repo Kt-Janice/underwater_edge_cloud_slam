@@ -1,0 +1,130 @@
+边端主节点文件
+lhf@lhf-janice:~/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src$ tree cloud_edge_slam/src/
+cloud_edge_slam/src/
+├── cloud_edge_demo.cpp
+├── cloud_edge_main.cpp
+├── ds_main.cpp
+└── SVIn2ORBWrapper.cpp
+
+边端ORB文件
+lhf@lhf-janice:~/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src$ tree cloud_edge_slam/lib_src/
+cloud_edge_slam/lib_src/
+├── Atlas.cc
+├── CameraModels
+│   ├── KannalaBrandt8.cpp
+│   └── Pinhole.cpp
+├── CloudImageSampler.cc
+├── CloudMerging.cc
+├── CloudMerging_old.cc
+├── Config.cc
+├── Converter.cc
+├── Frame.cc
+├── FrameDrawer.cc
+├── G2oTypes.cc
+├── GeometricTools.cc
+├── ImuTypes.cc
+├── KeyFrame.cc
+├── KeyFrameDatabase.cc
+├── KFDSample.cc
+├── LocalMapping.cc
+├── LoopClosing.cc
+├── Map.cc
+├── MapDrawer.cc
+├── MapPoint.cc
+├── MLPnPsolver.cpp
+├── OptimizableTypes.cpp
+├── Optimizer.cc
+├── ORBextractor.cc
+├── ORBmatcher.cc
+├── Settings.cc
+├── Sim3Solver.cc
+├── System.cc
+├── Tracking.cc
+├── TwoViewReconstruction.cc
+├── UmeyamaSim3Solver.cc
+└── Viewer.cc
+
+边端UDF隐式表征处理文件
+lhf@lhf-janice:~/vc-SLAM_ws/Edge-SLAM/Udf-Edge/src$ tree
+├── cap-edge
+│   ├── =5.4
+│   ├── ceshi3.npy
+│   ├── ceshi3.xyz
+│   ├── ChebyKANLayer copy.py
+│   ├── ChebyKANLayer.py
+│   ├── ckpt_040000.pth
+│   ├── confs
+│   │   ├── base1.conf
+│   │   └── base.conf
+│   ├── data_pth
+│   │   └── test.npz
+│   ├── downsample.py
+│   ├── edge_base.py
+│   ├── edge.py
+│   ├── edge-slam.py
+│   ├── edge-test1.py
+│   ├── edge-test.py
+│   ├── efficient-kan
+│   │   ├── examples
+│   │   │   └── mnist.py
+│   │   ├── LICENSE
+│   │   ├── pdm.lock
+│   │   ├── pyproject.toml
+│   │   ├── README.md
+│   │   ├── src
+│   │   │   └── efficient_kan
+│   │   │       ├── __init__.py
+│   │   │       └── kan.py
+│   │   └── tests
+│   │       └── test_simple_math.py
+│   ├── gir1.2-xkl-1.0_5.4-4_arm64.deb
+│   ├── libavresample-dev_4.2.7-0ubuntu0.1_arm64.deb
+│   ├── models
+│   │   ├── dataset_gpu1.py
+│   │   ├── dataset_gpu.py
+│   │   ├── dataset.py
+│   │   ├── embedder.py
+│   │   ├── fields.py
+│   │   ├── kan_network_gpu.py
+│   │   ├── kan_network.py
+│   │   └── __pycache__
+│   │       ├── dataset.cpython-38.pyc
+│   │       ├── dataset.cpython-39.pyc
+│   │       ├── dataset_gpu1.cpython-38.pyc
+│   │       ├── dataset_gpu.cpython-38.pyc
+│   │       ├── embedder.cpython-38.pyc
+│   │       ├── embedder.cpython-39.pyc
+│   │       ├── fields.cpython-38.pyc
+│   │       ├── fields.cpython-39.pyc
+│   │       ├── kan_network.cpython-38.pyc
+│   │       ├── kan_network.cpython-39.pyc
+│   │       └── kan_network_gpu.cpython-38.pyc
+│   ├── point_cloud40000.xyz
+│   ├── __pycache__
+│   │   ├── ChebyKANLayer.cpython-38.pyc
+│   │   └── ChebyKANLayer.cpython-39.pyc
+│   ├── test.py
+│   └── time.txt
+├── CMakeLists.txt
+├── data_pth
+│   └── test.npz
+└── msg_action
+    ├── actions
+    │   └── CloudSlam.action
+    ├── CMakeLists.txt
+    ├── msgs
+    │   ├── CloudMap.msg
+    │   ├── Descriptor.msg
+    │   ├── KeyFrame.msg
+    │   ├── KeyPoint.msg
+    │   ├── MapPoint.msg
+    │   ├── Observation.msg
+    │   └── Sequence.msg
+    ├── package.xml
+    ├── scripts
+    │   ├── client.py
+    │   ├── server.py
+    │   └── test_msg.py
+    └── src
+        └── client.cpp
+

@@ -1,0 +1,38 @@
+.repo-git/
+
+# ROS/CMake build outputs
+build/
+devel/
+install/
+log/
+logs/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated binaries and libraries
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+
+# GitHub rejects normal git blobs larger than 100 MB.
+Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/Vocabulary/ORBvoc.txt
+Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/Thirdparty/g2o/lib/libg2o.a

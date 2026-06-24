@@ -1,0 +1,10 @@
+# goal
+Sequence sequence
+float32 downsample_ratio
+int32 total_image_count
+---
+# result
+CloudMap map
+---
+# feedback
+int32 idx_image

@@ -1,0 +1,97 @@
+%YAML:1.0
+cameras:
+    - {T_SC:
+       [-0.99978035,  0.0169654 ,  0.01230551, -0.01719238,
+         0.01210102, -0.01210461,  0.99985351,  0.14944769,
+         0.01711187,  0.99978281,  0.01189665, -0.01915984,
+         0.0,         0.0,         0.0,         1.0],
+       image_dimension: [640, 512],
+       distortion_coefficients: [-0.06125568297136998, -0.003796743395135256, 0.027326634771204592, -0.030296403142887066],  
+       distortion_type: equidistant,
+       focal_length: [413.32595366566017, 413.70198739483686], 
+       principal_point: [305.9507483284928, 259.4439948946375]}  
+
+camera_params:
+    camera_rate: 20 
+    timestamp_tolerance: 0.015
+    sigma_absolute_translation: 0.0
+    sigma_absolute_orientation: 0.0
+    sigma_c_relative_translation: 0.0 
+    sigma_c_relative_orientation: 0.0 
+
+imu_params:
+    a_max: 176.0 
+    g_max: 7.8 
+    sigma_g_c: 0.001 
+    sigma_a_c: 0.02 
+    sigma_bg: 0.03 
+    sigma_ba: 0.1 
+    sigma_gw_c: 0.00005 
+    sigma_aw_c: 0.001 
+    tau: 3600.0 
+    g: 9.81007 
+    a0: [ 0.0, 0.0, 0.0 ] 
+    imu_rate: 200
+    T_BS:
+        [1.0000, 0.0000, 0.0000, 0.0000,
+         0.0000, 1.0000, 0.0000, 0.0000,
+         0.0000, 0.0000, 1.0000, 0.0000,
+         0.0000, 0.0000, 0.0000, 1.0000]
+# depth_params:
+#     T_SD:
+#         [1.0, 0.0, 0.0, 0.0,
+#          0.0, 1.0, 0.0, 0.0,
+#          0.0, 0.0, 1.0, 0.0,
+#          0.0, 0.0, 0.0, 1.0] 
+#     sigma_depth: 0.05 
+#     depth_delay: 0.0
+    
+sonar_params:
+    T_SSo:  
+        [1.0, 0.0, 0.0, 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, 0.0,
+         0.0, 0.0, 0.0, 1.0] 
+
+numKeyframes: 7 
+numImuFrames: 5 
+
+ceres_options:
+    minIterations: 3   
+    maxIterations: 10  
+    timeLimit: 0.035   
+
+detection_options:
+    threshold: 15.0      
+    octaves: 3           
+    maxNoKeypoints: 600  
+
+imageDelay: -0.0403806549886 
+
+displayImages: true  
+publishDebugImages: false  
+
+useDriver: false
+
+publishing_options:
+    publish_rate: 100                  
+    publishLandmarks: true             
+    landmarkQualityThreshold: 1.0e-2   
+    maximumLandmarkQuality: 0.05       
+    maxPathLength: 20                  
+    publishImuPropagatedState: true    
+    T_Wc_W:
+        [1.0000, 0.0000, 0.0000, 0.0000,
+         0.0000, 1.0000, 0.0000, 0.0000,
+         0.0000, 0.0000, 1.0000, 0.0000,
+         0.0000, 0.0000, 0.0000, 1.0000]
+    trackedBodyFrame: B                
+    velocitiesFrame: Wc                
+
+isSonarUsed: false
+isDepthUsed: false
+isRelocalization: true
+histogramMethod: "CLAHE" 
+claheClipLimit: 1.5
+claheTileGridSize: 2
+resizeFactor: 1.0
