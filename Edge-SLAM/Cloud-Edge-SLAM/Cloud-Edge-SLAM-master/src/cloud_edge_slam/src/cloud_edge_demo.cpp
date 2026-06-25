@@ -377,10 +377,11 @@ int main(int argc, char **argv) {
     string full_finish_path = full_finish_path_.string();
     int isCreate = mkdir(full_path.c_str(), S_IRUSR | S_IWUSR | S_IXUSR | S_IRWXG | S_IRWXO);//创建结果路径
     cerr << "create path: " << full_path << endl;
-    if (!isCreate)
+    if (!isCreate) {
         cerr << "create path finish" << endl;
-    else
+    } else {
         cerr << "create path failed! error code: !!!!!!!!!!!!" << isCreate << endl;
+    }
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM3::System SLAM(vocabularyPath, settingPath, ORB_SLAM3::System::MONOCULAR, true, bCloudMerge, bCloudOnline, bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum, nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd, samplerPDth, bOldUdf, bNewUdf);//

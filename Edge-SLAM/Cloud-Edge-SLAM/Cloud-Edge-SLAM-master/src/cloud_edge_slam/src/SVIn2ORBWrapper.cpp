@@ -126,10 +126,14 @@ void SVIn2ORBWrapper::InjectSVIn2MarginalizedData(const MarginalizedData& data) 
         }
     }
 
-    if (mWatchdogCb) mWatchdogCb(data.timestamp, data.num_landmarks);
+    if (mWatchdogCb) {
+        mWatchdogCb(data.timestamp, data.num_landmarks);
+    }
 
     TrackingState state = TrackingState::NORMAL;
-    if (mGetStateCb) state = mGetStateCb();
+    if (mGetStateCb) {
+        state = mGetStateCb();
+    }
 
     // 记录上一帧的状态，用于判断状态跃变
     static TrackingState last_state = TrackingState::NORMAL; 
@@ -147,8 +151,12 @@ void SVIn2ORBWrapper::InjectSVIn2MarginalizedData(const MarginalizedData& data) 
         CachedMarginalizedData safe_data;
         safe_data.timestamp = data.timestamp;
         safe_data.frame_id = data.frame_id;
-        for (int i = 0; i < 16; ++i) safe_data.Tcw_mat[i] = data.Tcw_mat[i];
-        for (size_t i = 0; i < data.num_landmarks; ++i) safe_data.landmarks_vec.push_back(data.landmarks[i]);
+        for (int i = 0; i < 16; ++i) {
+            safe_data.Tcw_mat[i] = data.Tcw_mat[i];
+        }
+        for (size_t i = 0; i < data.num_landmarks; ++i) {
+            safe_data.landmarks_vec.push_back(data.landmarks[i]);
+        }
         mWarningBuffer.push_back(safe_data);
     } 
     else if (state == TrackingState::LOST) {
