@@ -393,11 +393,7 @@ int main(int argc, char **argv) {
     std::string okvis_full_traj_path = full_path + "/okvis_full_traj.txt";
     pSVIn2ORBWrapper->InitOkvisFullTrajectorySaver(okvis_full_traj_path);
 
-<<<<<<< Updated upstream
-    std::string injection_candidate_traj_path = full_path + "/frontend_injection_candidate_traj.txt";
-=======
     std::string injection_candidate_traj_path = full_path + "/okvis_wrapper.txt";
->>>>>>> Stashed changes
     pSVIn2ORBWrapper->InitTrajectorySaver(injection_candidate_traj_path);
 
     Grabber igb(&SLAM);
