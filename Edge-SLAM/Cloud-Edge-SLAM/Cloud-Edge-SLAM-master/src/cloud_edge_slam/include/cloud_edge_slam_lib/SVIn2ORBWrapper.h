@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <functional>
 #include <fstream> // [新增] 必须包含此头文件
+#include <deque>   // [阶段2B修改] 前端位姿缓存队列
+#include <mutex>   // [阶段2B修改] 前端位姿缓存互斥锁
+#include "sophus/se3.hpp" // [阶段2B修改] 缓存 OKVIS / SVIn2 前端 Twc 位姿
 
 // 前置声明 ORB-SLAM3 的核心类
 namespace ORB_SLAM3 {
@@ -69,7 +72,15 @@ public:
     void RegisterStateCallbacks(std::function<void(double, int)> watchdog_cb, std::function<TrackingState()> get_state_cb);
     void InjectSVIn2MarginalizedData(const MarginalizedData& data);
     void InitTrajectorySaver(const std::string& path);
-    void CloseTrajectorySaver();   
+    void CloseTrajectorySaver();
+
+    // [阶段2B修改] 缓存 OKVIS / SVIn2 前端连续位姿。
+    // 该接口由 cloud_edge_demo.cpp 中的 fullStateCallback 调用，独立于 ORB-SLAM3 后端是否 LOST。
+    void CacheFrontendPose(const double timestamp, const Sophus::SE3f &Twc);
+
+    // [阶段2B修改] 按时间戳查询最近的 OKVIS / SVIn2 前端位姿。
+    // CloudMerging.cc 用该接口构造 OKVIS-CloudMap 相邻运动一致性权重。
+    bool GetNearestFrontendPose(const double timestamp, const double tolerance, Sophus::SE3f &Twc);
 private:
     ORB_SLAM3::System* mpSLAM;
     std::map<uint64_t, ORB_SLAM3::MapPoint*> mGlobalMapPoints;
@@ -78,6 +89,17 @@ private:
     std::function<TrackingState()> mGetStateCb;
     std::vector<CachedMarginalizedData> mWarningBuffer;
     std::ofstream mFrontendTrajFile;
+
+    // [阶段2B修改] OKVIS / SVIn2 前端位姿缓存，存 Twc，与 KeyFrame::GetPoseInverse() 的方向保持一致。
+    struct FrontendPoseData {
+        double timestamp;
+        Sophus::SE3f Twc;
+    };
+
+    std::deque<FrontendPoseData> mFrontendPoseBuffer;
+    std::mutex mFrontendPoseMutex;
+    size_t mnMaxFrontendPoseBufferSize = 5000;
+
     // 分离出的原生注入逻辑层
     void ExecuteInjection(const MarginalizedData& data);
 };

@@ -189,6 +189,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   lib_src/LocalMapping.cc
   lib_src/LoopClosing.cc
   lib_src/CloudMerging.cc
+  src/SVIn2ORBWrapper.cpp # [阶段2B修改] CloudMerging.cc 需要访问 SVIn2ORBWrapper 的前端位姿缓存。
   lib_src/CloudImageSampler.cc
   lib_src/KFDSample.cc
   lib_src/ORBextractor.cc
@@ -216,6 +217,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   lib_src/TwoViewReconstruction.cc
   lib_src/Config.cc
   lib_src/Settings.cc
+
 )
 
 ## Add cmake target dependencies of the library
@@ -234,7 +236,6 @@ add_dependencies(${PROJECT_NAME}_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam
 link_directories(/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/devel/lib)
 add_executable(cloud_edge_demo_node
   src/cloud_edge_demo.cpp
-  src/SVIn2ORBWrapper.cpp
 )
 add_dependencies(cloud_edge_demo_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
 
@@ -362,5 +363,3 @@ target_link_libraries(${PROJECT_NAME}_node
 # catkin_add_nosetests(test)
 
 #cap-udf
-
-

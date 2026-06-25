@@ -9,7 +9,9 @@
 #include <iomanip>
 #include <set>
 #include <set>
-#include <mutex> 
+#include <mutex>
+#include <limits> // [阶段2B修改] 前端位姿最近邻查询
+#include <cmath>  // [阶段2B修改] std::abs / std::isfinite
 
 // 声明全局指针，供 SVIn2(OKVIS) 的 Estimator.cpp 访问
 SVIn2ORBWrapper* pSVIn2ORBWrapper = nullptr;
@@ -19,6 +21,63 @@ SVIn2ORBWrapper::SVIn2ORBWrapper(ORB_SLAM3::System* pSLAM) {
 }
 
 SVIn2ORBWrapper::~SVIn2ORBWrapper() {
+}
+
+// [阶段2B修改] 缓存 OKVIS / SVIn2 前端连续 Twc 位姿。
+// 注意：该函数应由 fullStateCallback 调用，而不是只在 ExecuteInjection() 中调用。
+// 原因是 ORB-SLAM3 后端 LOST 时 ExecuteInjection() 可能不执行，但 OKVIS 前端仍可能连续输出位姿。
+void SVIn2ORBWrapper::CacheFrontendPose(const double timestamp, const Sophus::SE3f &Twc) {
+    if (!std::isfinite(timestamp)) {
+        return;
+    }
+
+    const Eigen::Vector3f translation = Twc.translation();
+    if (!translation.allFinite()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mFrontendPoseMutex);
+
+    FrontendPoseData data;
+    data.timestamp = timestamp;
+    data.Twc = Twc;
+    mFrontendPoseBuffer.push_back(data);
+
+    while (mFrontendPoseBuffer.size() > mnMaxFrontendPoseBufferSize) {
+        mFrontendPoseBuffer.pop_front();
+    }
+}
+
+// [阶段2B修改] 根据时间戳查询最近的 OKVIS / SVIn2 前端 Twc 位姿。
+// 如果缓存为空或最近时间差超过 tolerance，则返回 false，CloudMerging 会自动退回阶段2A运动弧长权重。
+bool SVIn2ORBWrapper::GetNearestFrontendPose(const double timestamp, const double tolerance, Sophus::SE3f &Twc) {
+    std::lock_guard<std::mutex> lock(mFrontendPoseMutex);
+
+    if (mFrontendPoseBuffer.empty()) {
+        return false;
+    }
+
+    double bestDeltaTime = std::numeric_limits<double>::max();
+    int bestIndex = -1;
+
+    for (size_t i = 0; i < mFrontendPoseBuffer.size(); i++) {
+        const double deltaTime = std::abs(mFrontendPoseBuffer[i].timestamp - timestamp);
+        if (deltaTime < bestDeltaTime) {
+            bestDeltaTime = deltaTime;
+            bestIndex = static_cast<int>(i);
+        }
+    }
+
+    if (bestIndex < 0) {
+        return false;
+    }
+
+    if (bestDeltaTime > tolerance) {
+        return false;
+    }
+
+    Twc = mFrontendPoseBuffer[bestIndex].Twc;
+    return true;
 }
 
 // 回调绑定实现

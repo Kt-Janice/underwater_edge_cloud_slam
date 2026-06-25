@@ -84,6 +84,7 @@
 #include<fstream> 
 #include "SVIn2ORBWrapper.h"
 #include <thread>
+#include <memory> // [阶段2B修改] fullStateCallback 中使用 std::shared_ptr
 
 // [新增 OS 级堆栈捕获探针头文件]
 #include <signal.h>
@@ -210,7 +211,38 @@ namespace okvis {
     void initEstimator(ThreadedKFVio* okvis_estimator, Publisher* publisher, VioParameters& parameters, Grabber* igb) {
         publisher->setParameters(parameters);
     
-        okvis_estimator->setFullStateCallback(std::bind(&okvis::Publisher::publishFullStateAsCallback, publisher, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3, std::placeholders::_4, std::placeholders::_5));
+        // [阶段2B修改] fullStateCallback 不再只转发给 Publisher，同时缓存 OKVIS / SVIn2 前端连续 Twc 位姿。
+        // 该缓存供 CloudMerging 阶段2B构造“OKVIS-CloudMap 相邻运动一致性权重”。
+        okvis_estimator->setFullStateCallback(
+            [publisher, &parameters](const okvis::Time& t,
+                                     const okvis::kinematics::Transformation& T_WS,
+                                     const Eigen::Matrix<double, 9, 1>& speedAndBiases,
+                                     const Eigen::Matrix<double, 3, 1>& omega_S,
+                                     const okvis::kinematics::Transformation& driftCorrected_T_WS) {
+                publisher->publishFullStateAsCallback(
+                    t,
+                    T_WS,
+                    speedAndBiases,
+                    omega_S,
+                    driftCorrected_T_WS);
+
+                if (pSVIn2ORBWrapper != nullptr) {
+                    std::shared_ptr<const okvis::kinematics::Transformation> T_SC_ptr =
+                        parameters.nCameraSystem.T_SC(0);
+
+                    if (T_SC_ptr != nullptr) {
+                        // [阶段2B修改] 与 Estimator.cpp 中伪装 KeyFrame 的坐标链保持一致：T_WC = T_WS * T_SC。
+                        okvis::kinematics::Transformation T_WC = T_WS * (*T_SC_ptr);
+
+                        Eigen::Quaterniond q_wc = T_WC.q();
+                        q_wc.normalize();
+                        Eigen::Vector3d t_wc = T_WC.r();
+
+                        Sophus::SE3f Twc(q_wc.cast<float>(), t_wc.cast<float>());
+                        pSVIn2ORBWrapper->CacheFrontendPose(t.toSec(), Twc);
+                    }
+                }
+            });
         
         okvis_estimator->setLandmarksCallback([publisher, igb](const okvis::Time& t, const okvis::MapPointVector& actualLandmarks, const okvis::MapPointVector& marginalizedLandmarks) {
             // 彻底注释掉下面这两行！
