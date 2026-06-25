@@ -11,6 +11,7 @@
 #include <fstream> // [新增] 必须包含此头文件
 #include <deque>   // [阶段2B修改] 前端位姿缓存队列
 #include <mutex>   // [阶段2B修改] 前端位姿缓存互斥锁
+#include <string>  // [阶段2B修改] 轨迹文件路径参数
 #include "sophus/se3.hpp" // [阶段2B修改] 缓存 OKVIS / SVIn2 前端 Twc 位姿
 
 // 前置声明 ORB-SLAM3 的核心类
@@ -73,6 +74,8 @@ public:
     void InjectSVIn2MarginalizedData(const MarginalizedData& data);
     void InitTrajectorySaver(const std::string& path);
     void CloseTrajectorySaver();
+    void InitOkvisFullTrajectorySaver(const std::string& path); // [阶段2B修改] 保存 fullStateCallback 输出的完整 OKVIS / SVIn2 前端轨迹
+    void CloseOkvisFullTrajectorySaver(); // [阶段2B修改] 关闭完整 OKVIS / SVIn2 前端轨迹文件
 
     // [阶段2B修改] 缓存 OKVIS / SVIn2 前端连续位姿。
     // 该接口由 cloud_edge_demo.cpp 中的 fullStateCallback 调用，独立于 ORB-SLAM3 后端是否 LOST。
@@ -89,6 +92,8 @@ private:
     std::function<TrackingState()> mGetStateCb;
     std::vector<CachedMarginalizedData> mWarningBuffer;
     std::ofstream mFrontendTrajFile;
+    std::ofstream mOkvisFullTrajFile; // [阶段2B修改] okvis_full_traj.txt，记录 fullStateCallback 连续前端轨迹
+    std::mutex mOkvisFullTrajFileMutex; // [阶段2B修改] 独立文件锁，避免与前端位姿缓存锁嵌套持有
 
     // [阶段2B修改] OKVIS / SVIn2 前端位姿缓存，存 Twc，与 KeyFrame::GetPoseInverse() 的方向保持一致。
     struct FrontendPoseData {
