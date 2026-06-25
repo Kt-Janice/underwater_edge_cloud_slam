@@ -388,8 +388,12 @@ int main(int argc, char **argv) {
     
     // [新增] 实例化 Wrapper 层，建立 OKVIS 到 ORB-SLAM3 的数据桥梁
     pSVIn2ORBWrapper = new SVIn2ORBWrapper(&SLAM);
-    std::string original_map_path = full_path + "/original_whole_map.txt";
-    pSVIn2ORBWrapper->InitTrajectorySaver(original_map_path);
+
+    std::string okvis_full_traj_path = full_path + "/okvis_full_traj.txt";
+    pSVIn2ORBWrapper->InitOkvisFullTrajectorySaver(okvis_full_traj_path);
+
+    std::string injection_candidate_traj_path = full_path + "/frontend_injection_candidate_traj.txt";
+    pSVIn2ORBWrapper->InitTrajectorySaver(injection_candidate_traj_path);
 
     Grabber igb(&SLAM);
 
@@ -550,7 +554,9 @@ int main(int argc, char **argv) {
 
     // 退出前的资源清理，销毁跨系统数据通信实例
     if (pSVIn2ORBWrapper != nullptr) {
+        pSVIn2ORBWrapper->CloseOkvisFullTrajectorySaver();
         pSVIn2ORBWrapper->CloseTrajectorySaver();
+
         delete pSVIn2ORBWrapper;
         pSVIn2ORBWrapper = nullptr;
     } else {
