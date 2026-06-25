@@ -32,19 +32,46 @@ void SVIn2ORBWrapper::CacheFrontendPose(const double timestamp, const Sophus::SE
     }
 
     const Eigen::Vector3f translation = Twc.translation();
+    const Eigen::Matrix3f rotation = Twc.rotationMatrix();
+
     if (!translation.allFinite()) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mFrontendPoseMutex);
+    if (!rotation.allFinite()) {
+        return;
+    }
 
-    FrontendPoseData data;
-    data.timestamp = timestamp;
-    data.Twc = Twc;
-    mFrontendPoseBuffer.push_back(data);
+    {
+        std::lock_guard<std::mutex> lock(mFrontendPoseMutex);
 
-    while (mFrontendPoseBuffer.size() > mnMaxFrontendPoseBufferSize) {
-        mFrontendPoseBuffer.pop_front();
+        FrontendPoseData data;
+        data.timestamp = timestamp;
+        data.Twc = Twc;
+        mFrontendPoseBuffer.push_back(data);
+
+        while (mFrontendPoseBuffer.size() > mnMaxFrontendPoseBufferSize) {
+            mFrontendPoseBuffer.pop_front();
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mOkvisFullTrajFileMutex);
+
+        if (mOkvisFullTrajFile.is_open()) {
+            Eigen::Quaternionf q_wc(rotation);
+            q_wc.normalize();
+
+            mOkvisFullTrajFile << std::fixed << std::setprecision(9)
+                               << timestamp << " "
+                               << translation.x() << " "
+                               << translation.y() << " "
+                               << translation.z() << " "
+                               << q_wc.x() << " "
+                               << q_wc.y() << " "
+                               << q_wc.z() << " "
+                               << q_wc.w() << std::endl;
+        }
     }
 }
 
@@ -322,15 +349,47 @@ void SVIn2ORBWrapper::ExecuteInjection(const MarginalizedData& data) {
 }
 void SVIn2ORBWrapper::InitTrajectorySaver(const std::string& path) {
     mFrontendTrajFile.open(path, std::ios::out);
-    if(mFrontendTrajFile.is_open()) {
-        std::cout << "\033[1;32m[Wrapper] Successfully opened frontend trajectory file: " << path << "\033[0m" << std::endl;
+    if (mFrontendTrajFile.is_open()) {
+        std::cout << "\033[1;32m[Wrapper] Successfully opened injection candidate trajectory file: "
+                  << path << "\033[0m" << std::endl;
     } else {
-        std::cout << "\033[1;31m[Wrapper] Failed to open frontend trajectory file!\033[0m" << std::endl;
+        std::cout << "\033[1;31m[Wrapper] Failed to open injection candidate trajectory file!\033[0m"
+                  << std::endl;
+    }
+}
+
+// [阶段2B修改] 初始化完整 OKVIS / SVIn2 前端轨迹文件，数据来自 fullStateCallback -> CacheFrontendPose()。
+void SVIn2ORBWrapper::InitOkvisFullTrajectorySaver(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mOkvisFullTrajFileMutex);
+
+    if (mOkvisFullTrajFile.is_open()) {
+        mOkvisFullTrajFile.close();
+    }
+
+    mOkvisFullTrajFile.open(path, std::ios::out);
+
+    if (mOkvisFullTrajFile.is_open()) {
+        std::cout << "\033[1;32m[Wrapper] Successfully opened OKVIS full trajectory file: "
+                  << path << "\033[0m" << std::endl;
+
+        mOkvisFullTrajFile << "# timestamp tx ty tz qx qy qz qw" << std::endl;
+    } else {
+        std::cout << "\033[1;31m[Wrapper] Failed to open OKVIS full trajectory file!\033[0m"
+                  << std::endl;
     }
 }
 
 void SVIn2ORBWrapper::CloseTrajectorySaver() {
-    if(mFrontendTrajFile.is_open()) {
+    if (mFrontendTrajFile.is_open()) {
         mFrontendTrajFile.close();
+    }
+}
+
+// [阶段2B修改] 关闭完整 OKVIS / SVIn2 前端轨迹文件。
+void SVIn2ORBWrapper::CloseOkvisFullTrajectorySaver() {
+    std::lock_guard<std::mutex> lock(mOkvisFullTrajFileMutex);
+
+    if (mOkvisFullTrajFile.is_open()) {
+        mOkvisFullTrajFile.close();
     }
 }
