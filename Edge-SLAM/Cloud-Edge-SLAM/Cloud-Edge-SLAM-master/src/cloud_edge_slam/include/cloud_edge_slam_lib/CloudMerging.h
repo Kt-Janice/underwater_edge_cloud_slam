@@ -14,6 +14,7 @@
 #include <boost/algorithm/string.hpp>
 #include <thread>
 #include <mutex>
+#include <string>
 #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
 
 namespace ORB_SLAM3 {
@@ -44,6 +45,9 @@ public:
     void SetTracker(Tracking *pTracker);
     void SetLocalMapper(LocalMapping *pLocalMapper);
     void SetLoopClosing(LoopClosing *pLoopClosing);
+
+    // [CloudMap校正诊断] 设置 CloudMap 校正前后轨迹调试输出目录。
+    void SetCloudMergeDebugOutputDir(const std::string &debugOutputDir);
 
     // Get Variables
     Map *GetEdgeFrontMap();
@@ -231,6 +235,11 @@ protected:
     string mstrFolderSubTraj;
     int mnNumCorrection;
     int mnCorrectionGBA;
+
+    // [CloudMap校正诊断] 输出 CloudMap 校正前后轨迹诊断文件。
+    std::string mCloudMergeDebugOutputDir;
+    int mnCloudMergeDebugOutputIndex;
+    std::mutex mMutexCloudMergeDebugOutputDir;
 
     // To (de)activate LC
     bool mbActiveCM = true;

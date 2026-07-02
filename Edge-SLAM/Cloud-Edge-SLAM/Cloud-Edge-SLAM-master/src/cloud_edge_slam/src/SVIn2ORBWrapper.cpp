@@ -78,6 +78,16 @@ void SVIn2ORBWrapper::CacheFrontendPose(const double timestamp, const Sophus::SE
 // [阶段2B修改] 根据时间戳查询最近的 OKVIS / SVIn2 前端 Twc 位姿。
 // 如果缓存为空或最近时间差超过 tolerance，则返回 false，CloudMerging 会自动退回阶段2A运动弧长权重。
 bool SVIn2ORBWrapper::GetNearestFrontendPose(const double timestamp, const double tolerance, Sophus::SE3f &Twc) {
+    double timeGap = 0.0;
+    return GetNearestFrontendPoseWithTimeGap(timestamp, tolerance, Twc, timeGap);
+}
+
+// [CloudMap校正诊断] 根据时间戳查询最近的前端 Twc 位姿，并返回实际时间差。
+bool SVIn2ORBWrapper::GetNearestFrontendPoseWithTimeGap(
+    const double timestamp,
+    const double tolerance,
+    Sophus::SE3f &Twc,
+    double &timeGap) {
     std::lock_guard<std::mutex> lock(mFrontendPoseMutex);
 
     if (mFrontendPoseBuffer.empty()) {
@@ -104,6 +114,7 @@ bool SVIn2ORBWrapper::GetNearestFrontendPose(const double timestamp, const doubl
     }
 
     Twc = mFrontendPoseBuffer[bestIndex].Twc;
+    timeGap = bestDeltaTime;
     return true;
 }
 

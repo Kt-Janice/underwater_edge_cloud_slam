@@ -35,11 +35,8 @@
 
 #include <Eigen/src/Core/ArithmeticSequence.h>
 #include <Eigen/src/Core/Matrix.h>
-#include <Eigen/SVD>
 #include <algorithm>
 #include <exception>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -73,11 +70,6 @@ constexpr double kFrontendPoseQueryTolerance = 0.05;
 constexpr double kFrontendTranslationConsistencyWeight = 1.0;
 constexpr double kFrontendRotationConsistencyWeight = 0.5;
 constexpr double kFrontendMaxUncertaintyScale = 3.0;
-constexpr double kCloudCorrectionDebugZWarningThreshold = 0.005;
-constexpr double kCloudCorrectionDebugBoundaryGapThreshold = 0.02;
-// [CloudMap校正诊断] Sim(3) 诊断只使用前端位姿缓存做虚拟尺度对齐，不写回 KeyFrame。
-constexpr double kSim3FrontendPoseQueryTolerance = 0.05;
-constexpr int kSim3MinAlignmentPairs = 5;
 
 // [阶段2B回退修改] CloudMap 首尾残差权重模式。默认使用时间线性权重作为当前稳定基线。
 enum class CloudCorrectionWeightMode {
@@ -88,32 +80,6 @@ enum class CloudCorrectionWeightMode {
 
 // [阶段2B回退修改] 默认不启用 motion-arc 或 OKVIS / SVIn2 frontend consistency，后续消融实验可改这里。
 constexpr CloudCorrectionWeightMode kCloudCorrectionWeightMode = CloudCorrectionWeightMode::TIME_LINEAR;
-
-// [Sim3合并实验] CloudMap 校正模式。
-// SE3_TIME_LINEAR_TWO_ANCHOR：旧的严格双锚点 SE(3) TIME-LINEAR 残差插值。
-// SIM3_ONLY：使用 CloudMap 与 frontend/edge 对应点估计 Sim(3)，只应用 Sim(3)，不再做 two-anchor 残差插值。
-// SIM3_PLUS_RESIDUAL_RESERVED：预留模式，后续用于 Sim(3) 后的小残差修正。
-enum class CloudMapCorrectionMode {
-    SE3_TIME_LINEAR_TWO_ANCHOR = 0,
-    SIM3_ONLY = 1,
-    SIM3_PLUS_RESIDUAL_RESERVED = 2
-};
-
-// [Sim3合并实验] 当前默认切换为 SIM3_ONLY，用于验证尺度感知对齐是否能改善 CloudMap Z 轴问题。
-constexpr CloudMapCorrectionMode kCloudMapCorrectionMode =
-    CloudMapCorrectionMode::SIM3_ONLY;
-
-// [Sim3合并实验] 用于查询 frontend / OKVIS 位姿的时间容差。
-constexpr double kCloudMergeSim3FrontendPoseQueryTolerance = 0.05;
-// [Sim3合并实验] 估计 Sim(3) 所需的最少匹配点数量。
-constexpr size_t kCloudMergeSim3MinPairs = 10;
-// [Sim3合并实验] Sim(3) 成功后的最大允许匹配 RMSE。当前先设宽松一点，避免误杀有效实验。
-constexpr double kCloudMergeSim3MaxPairRmse = 0.05;
-// [Sim3合并实验] Sim(3) 成功后的最大允许边界 gap。当前根据前期诊断，1-2 cm 可接受，先设为 0.05 m。
-constexpr double kCloudMergeSim3MaxBoundaryGap = 0.05;
-// [Sim3合并实验] 防止数值异常的尺度范围。
-constexpr double kCloudMergeSim3MinScale = 0.01;
-constexpr double kCloudMergeSim3MaxScale = 100.0;
 
 // [阶段2B修改] 统一过滤无效 CloudMap KeyFrame，避免补偿阶段触碰空指针或 bad keyframe。
 bool IsValidCloudMergeKeyFrame(KeyFrame *pKF) {
@@ -131,1354 +97,6 @@ bool IsValidCloudMergeKeyFrame(KeyFrame *pKF) {
 
     return true;
 }
-
-// [CloudMap校正诊断] 缓存一个 CloudMap KeyFrame 在 raw/head/after 三个阶段的 Twc 位姿。
-struct CloudCorrectionDebugPose {
-    KeyFrame *pKF;
-    double timestamp;
-    unsigned long keyFrameId;
-    Sophus::SE3f TwcRaw;
-    Sophus::SE3f TwcHeadAligned;
-    Sophus::SE3f TwcSim3Aligned;
-    Sophus::SE3f TwcAfter;
-    bool bHasSim3Aligned;
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-};
-
-using CloudCorrectionDebugPoseVector =
-    std::vector<CloudCorrectionDebugPose, Eigen::aligned_allocator<CloudCorrectionDebugPose>>;
-
-// [CloudMap校正诊断] 记录一个 CloudMap raw 位置到 OKVIS / SVIn2 前端位置的 Sim(3) 估计匹配点。
-struct CloudSim3AlignmentPair {
-    double timestamp;
-    unsigned long keyFrameId;
-    Eigen::Vector3d cloudRawPosition;
-    Eigen::Vector3d edgePosition;
-    Eigen::Vector3d sim3Position;
-    double rawToEdgeError;
-    double sim3ToEdgeError;
-    double timeGap;
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-};
-
-using CloudSim3AlignmentPairVector =
-    std::vector<CloudSim3AlignmentPair, Eigen::aligned_allocator<CloudSim3AlignmentPair>>;
-
-// [CloudMap校正诊断] Sim(3) 位置对齐结果，仅用于诊断虚拟轨迹导出。
-struct CloudSim3AlignmentResult {
-    bool bOk;
-    std::string status;
-    int numPairs;
-    double scale;
-    Eigen::Matrix3d rotation;
-    Eigen::Vector3d translation;
-    double rotationAngleDeg;
-    double rmseBeforeSim3;
-    double rmseAfterSim3;
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-};
-
-// [Sim3合并实验] Sim(3) 估计结果，方向为 p_frontend ≈ scale * R * p_cloud + t。
-struct CloudMergeSim3Result {
-    bool success;
-    double scale;
-    Eigen::Matrix3f R;
-    Eigen::Vector3f t;
-    double rmseBefore;
-    double rmseAfter;
-    size_t numPairs;
-    std::string failureReason;
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-};
-
-// [Sim3合并实验] 返回当前 CloudMap 校正模式名称，用于日志和 summary。
-const char *GetCloudMapCorrectionModeName(const CloudMapCorrectionMode mode) {
-    if (mode == CloudMapCorrectionMode::SE3_TIME_LINEAR_TWO_ANCHOR) {
-        return "SE3_TIME_LINEAR_TWO_ANCHOR";
-    }
-
-    if (mode == CloudMapCorrectionMode::SIM3_ONLY) {
-        return "SIM3_ONLY";
-    }
-
-    if (mode == CloudMapCorrectionMode::SIM3_PLUS_RESIDUAL_RESERVED) {
-        return "SIM3_PLUS_RESIDUAL_RESERVED";
-    }
-
-    return "UNKNOWN";
-}
-
-// [Sim3合并实验] 创建默认失败状态，避免未初始化数值进入日志。
-CloudMergeSim3Result MakeCloudMergeSim3Result() {
-    CloudMergeSim3Result result;
-    result.success = false;
-    result.scale = 1.0;
-    result.R = Eigen::Matrix3f::Identity();
-    result.t = Eigen::Vector3f::Zero();
-    result.rmseBefore = 0.0;
-    result.rmseAfter = 0.0;
-    result.numPairs = 0;
-    result.failureReason = "not_requested";
-    return result;
-}
-
-// [CloudMap校正诊断] 按时间过滤并排序当前 CloudMap 关键帧集合。
-std::vector<KeyFrame *> BuildSortedCloudDebugKeyFrames(const std::vector<KeyFrame *> &vCloudKeyFrames) {
-    std::vector<KeyFrame *> vSortedCloudKeyFrames;
-    vSortedCloudKeyFrames.reserve(vCloudKeyFrames.size());
-
-    for (size_t i = 0; i < vCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vCloudKeyFrames[i];
-        if (!IsValidCloudMergeKeyFrame(pKF)) {
-            continue;
-        }
-
-        vSortedCloudKeyFrames.push_back(pKF);
-    }
-
-    std::sort(vSortedCloudKeyFrames.begin(), vSortedCloudKeyFrames.end(), [](KeyFrame *pLeft, KeyFrame *pRight) {
-        return pLeft->mTimeStamp < pRight->mTimeStamp;
-    });
-
-    return vSortedCloudKeyFrames;
-}
-
-// [CloudMap校正诊断] 将 Sim3 单位尺度位姿转成 SE3f，仅用于调试轨迹输出。
-Sophus::SE3f Sim3ToSE3f(const Sophus::Sim3d &sim3Pose) {
-    Sophus::SE3f pose(sim3Pose.rotationMatrix().cast<float>(), sim3Pose.translation().cast<float>());
-    return pose;
-}
-
-// [CloudMap校正诊断] 构造 raw 和 head-aligned-only 调试快照，不写回 KeyFrame。
-CloudCorrectionDebugPoseVector BuildCloudCorrectionDebugSnapshots(
-    const std::vector<KeyFrame *> &vSortedCloudKeyFrames,
-    const Sophus::Sim3d &SHead) {
-    CloudCorrectionDebugPoseVector vSnapshots;
-    vSnapshots.reserve(vSortedCloudKeyFrames.size());
-
-    for (size_t i = 0; i < vSortedCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vSortedCloudKeyFrames[i];
-        if (!IsValidCloudMergeKeyFrame(pKF)) {
-            continue;
-        }
-
-        Sophus::SE3f TwcRaw = pKF->GetPoseInverse();
-        Sophus::Sim3d rawSim3(TwcRaw.unit_quaternion().cast<double>(), TwcRaw.translation().cast<double>());
-        rawSim3.setScale(1.0);
-        Sophus::SE3f TwcHeadAligned = Sim3ToSE3f(SHead * rawSim3);
-
-        CloudCorrectionDebugPose snapshot;
-        snapshot.pKF = pKF;
-        snapshot.timestamp = pKF->mTimeStamp;
-        snapshot.keyFrameId = pKF->mnId;
-        snapshot.TwcRaw = TwcRaw;
-        snapshot.TwcHeadAligned = TwcHeadAligned;
-        snapshot.TwcSim3Aligned = TwcHeadAligned;
-        snapshot.TwcAfter = TwcRaw;
-        snapshot.bHasSim3Aligned = false;
-        vSnapshots.push_back(snapshot);
-    }
-
-    return vSnapshots;
-}
-
-// [CloudMap校正诊断] 校正完成后读取 KeyFrame 当前实际位姿。
-void FillCloudCorrectionDebugAfterPose(CloudCorrectionDebugPoseVector &vSnapshots) {
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        if (!IsValidCloudMergeKeyFrame(vSnapshots[i].pKF)) {
-            continue;
-        }
-
-        vSnapshots[i].TwcAfter = vSnapshots[i].pKF->GetPoseInverse();
-    }
-}
-
-// [CloudMap校正诊断] 创建 Sim(3) 诊断默认结果。
-CloudSim3AlignmentResult MakeCloudSim3AlignmentResult(const std::string &status) {
-    CloudSim3AlignmentResult result;
-    result.bOk = false;
-    result.status = status;
-    result.numPairs = 0;
-    result.scale = std::numeric_limits<double>::quiet_NaN();
-    result.rotation = Eigen::Matrix3d::Identity();
-    result.translation = Eigen::Vector3d::Zero();
-    result.rotationAngleDeg = std::numeric_limits<double>::quiet_NaN();
-    result.rmseBeforeSim3 = std::numeric_limits<double>::quiet_NaN();
-    result.rmseAfterSim3 = std::numeric_limits<double>::quiet_NaN();
-    return result;
-}
-
-// [CloudMap校正诊断] 收集 CloudMap raw 位置与最近 OKVIS / SVIn2 前端位置的时间匹配点。
-CloudSim3AlignmentPairVector BuildCloudSim3AlignmentPairs(
-    const CloudCorrectionDebugPoseVector &vSnapshots) {
-    CloudSim3AlignmentPairVector vPairs;
-
-    if (::pSVIn2ORBWrapper == nullptr) {
-        return vPairs;
-    }
-
-    vPairs.reserve(vSnapshots.size());
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        if (!IsValidCloudMergeKeyFrame(vSnapshots[i].pKF)) {
-            continue;
-        }
-
-        Sophus::SE3f TwcFrontend;
-        double timeGap = 0.0;
-        const bool bFoundFrontendPose = ::pSVIn2ORBWrapper->GetNearestFrontendPoseWithTimeGap(
-            vSnapshots[i].timestamp,
-            kSim3FrontendPoseQueryTolerance,
-            TwcFrontend,
-            timeGap);
-
-        if (!bFoundFrontendPose) {
-            continue;
-        }
-
-        const Eigen::Vector3d cloudRawPosition = vSnapshots[i].TwcRaw.translation().cast<double>();
-        const Eigen::Vector3d edgePosition = TwcFrontend.translation().cast<double>();
-        if (!cloudRawPosition.allFinite()) {
-            continue;
-        }
-
-        if (!edgePosition.allFinite()) {
-            continue;
-        }
-
-        CloudSim3AlignmentPair pair;
-        pair.timestamp = vSnapshots[i].timestamp;
-        pair.keyFrameId = vSnapshots[i].keyFrameId;
-        pair.cloudRawPosition = cloudRawPosition;
-        pair.edgePosition = edgePosition;
-        pair.sim3Position = cloudRawPosition;
-        pair.rawToEdgeError = (cloudRawPosition - edgePosition).norm();
-        pair.sim3ToEdgeError = std::numeric_limits<double>::quiet_NaN();
-        pair.timeGap = timeGap;
-        vPairs.push_back(pair);
-    }
-
-    return vPairs;
-}
-
-// [CloudMap校正诊断] 使用 Umeyama similarity alignment 估计 p_edge ≈ s * R * p_cloud + t。
-CloudSim3AlignmentResult EstimateCloudSim3Alignment(
-    CloudSim3AlignmentPairVector &vPairs) {
-    CloudSim3AlignmentResult result = MakeCloudSim3AlignmentResult("failed_numeric");
-    result.numPairs = static_cast<int>(vPairs.size());
-
-    if (vPairs.size() < static_cast<size_t>(kSim3MinAlignmentPairs)) {
-        result.status = "failed_insufficient_pairs";
-        return result;
-    }
-
-    Eigen::Vector3d sourceMean = Eigen::Vector3d::Zero();
-    Eigen::Vector3d targetMean = Eigen::Vector3d::Zero();
-    for (size_t i = 0; i < vPairs.size(); i++) {
-        sourceMean += vPairs[i].cloudRawPosition;
-        targetMean += vPairs[i].edgePosition;
-    }
-
-    const double invCount = 1.0 / static_cast<double>(vPairs.size());
-    sourceMean *= invCount;
-    targetMean *= invCount;
-
-    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-    double sourceVariance = 0.0;
-    for (size_t i = 0; i < vPairs.size(); i++) {
-        const Eigen::Vector3d sourceCentered = vPairs[i].cloudRawPosition - sourceMean;
-        const Eigen::Vector3d targetCentered = vPairs[i].edgePosition - targetMean;
-        covariance += targetCentered * sourceCentered.transpose();
-        sourceVariance += sourceCentered.squaredNorm();
-    }
-
-    covariance *= invCount;
-    sourceVariance *= invCount;
-
-    if (!covariance.allFinite()) {
-        return result;
-    }
-
-    if (!std::isfinite(sourceVariance)) {
-        return result;
-    }
-
-    if (sourceVariance <= std::numeric_limits<double>::epsilon()) {
-        return result;
-    }
-
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(covariance, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    const Eigen::Matrix3d U = svd.matrixU();
-    const Eigen::Matrix3d V = svd.matrixV();
-    if (!U.allFinite() || !V.allFinite()) {
-        return result;
-    }
-
-    Eigen::Matrix3d reflectionGuard = Eigen::Matrix3d::Identity();
-    if ((U * V.transpose()).determinant() < 0.0) {
-        reflectionGuard(2, 2) = -1.0;
-    }
-
-    const Eigen::Matrix3d rotation = U * reflectionGuard * V.transpose();
-    if (!rotation.allFinite()) {
-        return result;
-    }
-
-    if (rotation.determinant() <= 0.0) {
-        return result;
-    }
-
-    const Eigen::Vector3d singularValues = svd.singularValues();
-    const Eigen::Vector3d reflectionSigns = reflectionGuard.diagonal();
-    const double scaleNumerator = singularValues.dot(reflectionSigns);
-    const double scale = scaleNumerator / sourceVariance;
-    if (!std::isfinite(scale)) {
-        return result;
-    }
-
-    if (scale <= 0.0) {
-        return result;
-    }
-
-    const Eigen::Vector3d translation = targetMean - scale * rotation * sourceMean;
-    if (!translation.allFinite()) {
-        return result;
-    }
-
-    double sumBeforeSquared = 0.0;
-    double sumAfterSquared = 0.0;
-    for (size_t i = 0; i < vPairs.size(); i++) {
-        const Eigen::Vector3d sim3Position = scale * rotation * vPairs[i].cloudRawPosition + translation;
-        if (!sim3Position.allFinite()) {
-            return result;
-        }
-
-        vPairs[i].sim3Position = sim3Position;
-        vPairs[i].rawToEdgeError = (vPairs[i].cloudRawPosition - vPairs[i].edgePosition).norm();
-        vPairs[i].sim3ToEdgeError = (sim3Position - vPairs[i].edgePosition).norm();
-        sumBeforeSquared += vPairs[i].rawToEdgeError * vPairs[i].rawToEdgeError;
-        sumAfterSquared += vPairs[i].sim3ToEdgeError * vPairs[i].sim3ToEdgeError;
-    }
-
-    const double pi = std::acos(-1.0);
-    Eigen::AngleAxisd angleAxis(rotation);
-
-    result.bOk = true;
-    result.status = "ok";
-    result.scale = scale;
-    result.rotation = rotation;
-    result.translation = translation;
-    result.rotationAngleDeg = std::abs(angleAxis.angle()) * 180.0 / pi;
-    result.rmseBeforeSim3 = std::sqrt(sumBeforeSquared / static_cast<double>(vPairs.size()));
-    result.rmseAfterSim3 = std::sqrt(sumAfterSquared / static_cast<double>(vPairs.size()));
-    return result;
-}
-
-// [Sim3合并实验] 使用 CloudMap KeyFrame 与 frontend/OKVIS 位姿缓存估计 Sim(3)。
-// 输入 cloud KeyFrame 的校正前 Twc.translation() 作为 cloud 点；
-// 输入同时间 frontend Twc.translation() 作为 edge/frontend 点；
-// 估计 p_frontend = s * R * p_cloud + t。
-bool EstimateCloudToFrontendSim3(
-    const std::vector<ORB_SLAM3::KeyFrame *> &vCloudKeyFrames,
-    CloudMergeSim3Result &sim3Result,
-    std::vector<double> &matchedTimestamps,
-    std::vector<unsigned long> &matchedKeyFrameIds,
-    std::vector<Eigen::Vector3f> &cloudPoints,
-    std::vector<Eigen::Vector3f> &frontendPoints,
-    std::vector<double> &timeGaps) {
-    sim3Result = MakeCloudMergeSim3Result();
-    sim3Result.failureReason = "failed_numeric";
-
-    matchedTimestamps.clear();
-    matchedKeyFrameIds.clear();
-    cloudPoints.clear();
-    frontendPoints.clear();
-    timeGaps.clear();
-
-    if (::pSVIn2ORBWrapper == nullptr) {
-        sim3Result.failureReason = "frontend_wrapper_unavailable";
-        return false;
-    }
-
-    for (size_t i = 0; i < vCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vCloudKeyFrames[i];
-        if (!IsValidCloudMergeKeyFrame(pKF)) {
-            continue;
-        }
-
-        const Sophus::SE3f TwcCloud = pKF->GetPoseInverse();
-        const Eigen::Vector3f pCloud = TwcCloud.translation();
-        if (!pCloud.allFinite()) {
-            continue;
-        }
-
-        Sophus::SE3f TwcFrontend;
-        double timeGap = 0.0;
-        const bool bFoundFrontendPose = ::pSVIn2ORBWrapper->GetNearestFrontendPoseWithTimeGap(
-            pKF->mTimeStamp,
-            kCloudMergeSim3FrontendPoseQueryTolerance,
-            TwcFrontend,
-            timeGap);
-
-        if (!bFoundFrontendPose) {
-            continue;
-        }
-
-        const Eigen::Vector3f pFrontend = TwcFrontend.translation();
-        if (!pFrontend.allFinite()) {
-            continue;
-        }
-
-        matchedTimestamps.push_back(pKF->mTimeStamp);
-        matchedKeyFrameIds.push_back(pKF->mnId);
-        cloudPoints.push_back(pCloud);
-        frontendPoints.push_back(pFrontend);
-        timeGaps.push_back(timeGap);
-    }
-
-    sim3Result.numPairs = cloudPoints.size();
-    if (cloudPoints.size() < kCloudMergeSim3MinPairs) {
-        sim3Result.failureReason = "insufficient_pairs";
-        return false;
-    }
-
-    Eigen::Vector3d cloudMean = Eigen::Vector3d::Zero();
-    Eigen::Vector3d frontendMean = Eigen::Vector3d::Zero();
-    for (size_t i = 0; i < cloudPoints.size(); i++) {
-        cloudMean += cloudPoints[i].cast<double>();
-        frontendMean += frontendPoints[i].cast<double>();
-    }
-
-    const double invCount = 1.0 / static_cast<double>(cloudPoints.size());
-    cloudMean *= invCount;
-    frontendMean *= invCount;
-
-    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-    double cloudVariance = 0.0;
-    double sumBeforeSquared = 0.0;
-    for (size_t i = 0; i < cloudPoints.size(); i++) {
-        const Eigen::Vector3d pCloud = cloudPoints[i].cast<double>();
-        const Eigen::Vector3d pFrontend = frontendPoints[i].cast<double>();
-        const Eigen::Vector3d cloudCentered = pCloud - cloudMean;
-        const Eigen::Vector3d frontendCentered = pFrontend - frontendMean;
-
-        covariance += frontendCentered * cloudCentered.transpose();
-        cloudVariance += cloudCentered.squaredNorm();
-        sumBeforeSquared += (pCloud - pFrontend).squaredNorm();
-    }
-
-    covariance *= invCount;
-    cloudVariance *= invCount;
-
-    if (!covariance.allFinite()) {
-        sim3Result.failureReason = "invalid_covariance";
-        return false;
-    }
-
-    if (!std::isfinite(cloudVariance)) {
-        sim3Result.failureReason = "invalid_cloud_variance";
-        return false;
-    }
-
-    if (cloudVariance <= std::numeric_limits<double>::epsilon()) {
-        sim3Result.failureReason = "degenerate_cloud_variance";
-        return false;
-    }
-
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(covariance, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    const Eigen::Matrix3d U = svd.matrixU();
-    const Eigen::Matrix3d V = svd.matrixV();
-    if (!U.allFinite() || !V.allFinite()) {
-        sim3Result.failureReason = "invalid_svd";
-        return false;
-    }
-
-    Eigen::Matrix3d signCorrection = Eigen::Matrix3d::Identity();
-    if ((U * V.transpose()).determinant() < 0.0) {
-        signCorrection(2, 2) = -1.0;
-    }
-
-    const Eigen::Matrix3d R = U * signCorrection * V.transpose();
-    if (!R.allFinite()) {
-        sim3Result.failureReason = "invalid_rotation";
-        return false;
-    }
-
-    if (R.determinant() <= 0.0) {
-        sim3Result.failureReason = "reflection_rotation";
-        return false;
-    }
-
-    const Eigen::Vector3d singularValues = svd.singularValues();
-    const Eigen::Vector3d signValues = signCorrection.diagonal();
-    const double scale = singularValues.dot(signValues) / cloudVariance;
-    if (!std::isfinite(scale)) {
-        sim3Result.failureReason = "invalid_scale";
-        return false;
-    }
-
-    if (scale < kCloudMergeSim3MinScale || scale > kCloudMergeSim3MaxScale) {
-        sim3Result.failureReason = "scale_out_of_range";
-        return false;
-    }
-
-    const Eigen::Vector3d t = frontendMean - scale * R * cloudMean;
-    if (!t.allFinite()) {
-        sim3Result.failureReason = "invalid_translation";
-        return false;
-    }
-
-    double sumAfterSquared = 0.0;
-    for (size_t i = 0; i < cloudPoints.size(); i++) {
-        const Eigen::Vector3d pCloud = cloudPoints[i].cast<double>();
-        const Eigen::Vector3d pFrontend = frontendPoints[i].cast<double>();
-        const Eigen::Vector3d pSim3 = scale * R * pCloud + t;
-        if (!pSim3.allFinite()) {
-            sim3Result.failureReason = "invalid_transformed_point";
-            return false;
-        }
-
-        sumAfterSquared += (pSim3 - pFrontend).squaredNorm();
-    }
-
-    sim3Result.rmseBefore = std::sqrt(sumBeforeSquared / static_cast<double>(cloudPoints.size()));
-    sim3Result.rmseAfter = std::sqrt(sumAfterSquared / static_cast<double>(cloudPoints.size()));
-    if (!std::isfinite(sim3Result.rmseAfter)) {
-        sim3Result.failureReason = "invalid_rmse_after";
-        return false;
-    }
-
-    if (sim3Result.rmseAfter > kCloudMergeSim3MaxPairRmse) {
-        sim3Result.failureReason = "rmse_after_too_large";
-        return false;
-    }
-
-    sim3Result.success = true;
-    sim3Result.scale = scale;
-    sim3Result.R = R.cast<float>();
-    sim3Result.t = t.cast<float>();
-    sim3Result.failureReason = "";
-    return true;
-}
-
-// [Sim3合并实验] 将估计得到的 Sim(3) 应用到 CloudMap KeyFrame 和 MapPoint。
-bool ApplySim3ToCloudMap(
-    ORB_SLAM3::Map *pCloudMap,
-    const std::vector<ORB_SLAM3::KeyFrame *> &vCloudKeyFrames,
-    const CloudMergeSim3Result &sim3Result) {
-    if (pCloudMap == nullptr) {
-        return false;
-    }
-
-    if (!sim3Result.success) {
-        return false;
-    }
-
-    for (size_t i = 0; i < vCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vCloudKeyFrames[i];
-        if (!IsValidCloudMergeKeyFrame(pKF)) {
-            continue;
-        }
-
-        const Sophus::SE3f TwcOld = pKF->GetPoseInverse();
-        const Eigen::Matrix3f RwcOld = TwcOld.rotationMatrix();
-        const Eigen::Vector3f twcOld = TwcOld.translation();
-
-        Eigen::Matrix3f RwcNew = sim3Result.R * RwcOld;
-        Eigen::Quaternionf qwcNew(RwcNew);
-        qwcNew.normalize();
-        RwcNew = qwcNew.toRotationMatrix();
-
-        const Eigen::Vector3f twcNew = static_cast<float>(sim3Result.scale) * sim3Result.R * twcOld + sim3Result.t;
-
-        Sophus::SE3f TwcNew(RwcNew, twcNew);
-        pKF->SetPose(TwcNew.inverse());
-    }
-
-    const std::vector<MapPoint *> vpCloudMapPoints = pCloudMap->GetAllMapPoints();
-    for (size_t i = 0; i < vpCloudMapPoints.size(); i++) {
-        MapPoint *pMP = vpCloudMapPoints[i];
-        if (pMP == nullptr) {
-            continue;
-        }
-
-        if (pMP->isBad()) {
-            continue;
-        }
-
-        const Eigen::Vector3f PwOld = pMP->GetWorldPos();
-        if (!PwOld.allFinite()) {
-            continue;
-        }
-
-        const Eigen::Vector3f PwNew = static_cast<float>(sim3Result.scale) * sim3Result.R * PwOld + sim3Result.t;
-        if (!PwNew.allFinite()) {
-            continue;
-        }
-
-        pMP->SetWorldPos(PwNew);
-        pMP->UpdateNormalAndDepth();
-    }
-
-    return true;
-}
-
-// [CloudMap校正诊断] 将估计的 Sim(3) 应用到调试快照中的虚拟轨迹，不写回 KeyFrame。
-void FillCloudSim3AlignedDebugPose(
-    CloudCorrectionDebugPoseVector &vSnapshots,
-    const CloudSim3AlignmentResult &sim3Result) {
-    if (!sim3Result.bOk) {
-        return;
-    }
-
-    const Eigen::Matrix3f rotation = sim3Result.rotation.cast<float>();
-    const Eigen::Vector3f translation = sim3Result.translation.cast<float>();
-    const float scale = static_cast<float>(sim3Result.scale);
-
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        const Eigen::Vector3f rawPosition = vSnapshots[i].TwcRaw.translation();
-        const Eigen::Vector3f sim3Position = scale * rotation * rawPosition + translation;
-        const Eigen::Matrix3f sim3Rotation = rotation * vSnapshots[i].TwcRaw.rotationMatrix();
-        Eigen::Quaternionf sim3Quaternion(sim3Rotation);
-        sim3Quaternion.normalize();
-
-        vSnapshots[i].TwcSim3Aligned = Sophus::SE3f(sim3Quaternion.toRotationMatrix(), sim3Position);
-        vSnapshots[i].bHasSim3Aligned = true;
-    }
-}
-
-// [CloudMap校正诊断] 写 TUM 格式轨迹。
-void WriteCloudCorrectionDebugTum(
-    const std::string &path,
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    const std::string &poseStage) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Correction Debug] Failed to open trajectory file: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        const Sophus::SE3f *pPose = nullptr;
-        if (poseStage == "raw") {
-            pPose = &vSnapshots[i].TwcRaw;
-        } else if (poseStage == "head") {
-            pPose = &vSnapshots[i].TwcHeadAligned;
-        } else if (poseStage == "sim3") {
-            if (vSnapshots[i].bHasSim3Aligned) {
-                pPose = &vSnapshots[i].TwcSim3Aligned;
-            }
-        } else if (poseStage == "after") {
-            pPose = &vSnapshots[i].TwcAfter;
-        }
-
-        if (pPose == nullptr) {
-            continue;
-        }
-
-        const Eigen::Vector3f translation = pPose->translation();
-        Eigen::Quaternionf quaternion = pPose->unit_quaternion();
-        quaternion.normalize();
-
-        ofs << std::fixed << std::setprecision(9)
-            << vSnapshots[i].timestamp << " "
-            << translation.x() << " "
-            << translation.y() << " "
-            << translation.z() << " "
-            << quaternion.x() << " "
-            << quaternion.y() << " "
-            << quaternion.z() << " "
-            << quaternion.w() << std::endl;
-    }
-
-    ofs.close();
-}
-
-// [CloudMap校正诊断] 计算轨迹长度。
-double ComputeCloudCorrectionDebugPathLength(
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    const std::string &poseStage) {
-    if (vSnapshots.size() < 2) {
-        return 0.0;
-    }
-
-    double pathLength = 0.0;
-    for (size_t i = 1; i < vSnapshots.size(); i++) {
-        const Sophus::SE3f *pPrevPose = nullptr;
-        const Sophus::SE3f *pCurrPose = nullptr;
-
-        if (poseStage == "raw") {
-            pPrevPose = &vSnapshots[i - 1].TwcRaw;
-            pCurrPose = &vSnapshots[i].TwcRaw;
-        } else if (poseStage == "head") {
-            pPrevPose = &vSnapshots[i - 1].TwcHeadAligned;
-            pCurrPose = &vSnapshots[i].TwcHeadAligned;
-        } else if (poseStage == "sim3") {
-            if (vSnapshots[i - 1].bHasSim3Aligned && vSnapshots[i].bHasSim3Aligned) {
-                pPrevPose = &vSnapshots[i - 1].TwcSim3Aligned;
-                pCurrPose = &vSnapshots[i].TwcSim3Aligned;
-            }
-        } else if (poseStage == "after") {
-            pPrevPose = &vSnapshots[i - 1].TwcAfter;
-            pCurrPose = &vSnapshots[i].TwcAfter;
-        }
-
-        if (pPrevPose == nullptr || pCurrPose == nullptr) {
-            continue;
-        }
-
-        pathLength += static_cast<double>((pCurrPose->translation() - pPrevPose->translation()).norm());
-    }
-
-    return pathLength;
-}
-
-// [CloudMap校正诊断] 统计 Z 范围与均值。
-void ComputeCloudCorrectionDebugZStats(
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    const std::string &poseStage,
-    double &zMin,
-    double &zMax,
-    double &zMean) {
-    zMin = std::numeric_limits<double>::quiet_NaN();
-    zMax = std::numeric_limits<double>::quiet_NaN();
-    zMean = std::numeric_limits<double>::quiet_NaN();
-
-    if (vSnapshots.empty()) {
-        return;
-    }
-
-    double zSum = 0.0;
-    size_t count = 0;
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        const Sophus::SE3f *pPose = nullptr;
-        if (poseStage == "raw") {
-            pPose = &vSnapshots[i].TwcRaw;
-        } else if (poseStage == "head") {
-            pPose = &vSnapshots[i].TwcHeadAligned;
-        } else if (poseStage == "sim3") {
-            if (vSnapshots[i].bHasSim3Aligned) {
-                pPose = &vSnapshots[i].TwcSim3Aligned;
-            }
-        } else if (poseStage == "after") {
-            pPose = &vSnapshots[i].TwcAfter;
-        }
-
-        if (pPose == nullptr) {
-            continue;
-        }
-
-        const double z = static_cast<double>(pPose->translation().z());
-        if (count == 0) {
-            zMin = z;
-            zMax = z;
-        } else {
-            if (z < zMin) {
-                zMin = z;
-            }
-
-            if (z > zMax) {
-                zMax = z;
-            }
-        }
-
-        zSum += z;
-        count++;
-    }
-
-    if (count > 0) {
-        zMean = zSum / static_cast<double>(count);
-    }
-}
-
-// [CloudMap校正诊断] 计算两点平移距离。
-double ComputeCloudCorrectionDebugGap(const Sophus::SE3f &left, const Sophus::SE3f &right) {
-    return static_cast<double>((left.translation() - right.translation()).norm());
-}
-
-// [CloudMap校正诊断] 写每个 KeyFrame 的 Z 改变量 CSV。
-void WriteCloudCorrectionDebugCsv(
-    const std::string &path,
-    const CloudCorrectionDebugPoseVector &vSnapshots) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Correction Debug] Failed to open CSV: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    ofs << "timestamp,keyframe_id,"
-        << "raw_x,raw_y,raw_z,"
-        << "head_x,head_y,head_z,"
-        << "after_x,after_y,after_z,"
-        << "head_minus_raw_z,"
-        << "after_minus_head_z,"
-        << "after_minus_raw_z"
-        << std::endl;
-
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        const Eigen::Vector3f raw = vSnapshots[i].TwcRaw.translation();
-        const Eigen::Vector3f head = vSnapshots[i].TwcHeadAligned.translation();
-        const Eigen::Vector3f after = vSnapshots[i].TwcAfter.translation();
-
-        ofs << std::fixed << std::setprecision(9)
-            << vSnapshots[i].timestamp << ","
-            << vSnapshots[i].keyFrameId << ","
-            << raw.x() << ","
-            << raw.y() << ","
-            << raw.z() << ","
-            << head.x() << ","
-            << head.y() << ","
-            << head.z() << ","
-            << after.x() << ","
-            << after.y() << ","
-            << after.z() << ","
-            << head.z() - raw.z() << ","
-            << after.z() - head.z() << ","
-            << after.z() - raw.z()
-            << std::endl;
-    }
-
-    ofs.close();
-}
-
-// [CloudMap校正诊断] 写 Sim(3) 估计使用的 CloudMap-frontend 匹配点。
-void WriteCloudSim3AlignmentPairsCsv(
-    const std::string &path,
-    const CloudSim3AlignmentPairVector &vPairs) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Sim3 Debug] Failed to open CSV: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    ofs << "timestamp,keyframe_id,"
-        << "cloud_raw_x,cloud_raw_y,cloud_raw_z,"
-        << "edge_x,edge_y,edge_z,"
-        << "sim3_x,sim3_y,sim3_z,"
-        << "raw_to_edge_error,"
-        << "sim3_to_edge_error,"
-        << "time_gap"
-        << std::endl;
-
-    for (size_t i = 0; i < vPairs.size(); i++) {
-        ofs << std::fixed << std::setprecision(9)
-            << vPairs[i].timestamp << ","
-            << vPairs[i].keyFrameId << ","
-            << vPairs[i].cloudRawPosition.x() << ","
-            << vPairs[i].cloudRawPosition.y() << ","
-            << vPairs[i].cloudRawPosition.z() << ","
-            << vPairs[i].edgePosition.x() << ","
-            << vPairs[i].edgePosition.y() << ","
-            << vPairs[i].edgePosition.z() << ","
-            << vPairs[i].sim3Position.x() << ","
-            << vPairs[i].sim3Position.y() << ","
-            << vPairs[i].sim3Position.z() << ","
-            << vPairs[i].rawToEdgeError << ","
-            << vPairs[i].sim3ToEdgeError << ","
-            << vPairs[i].timeGap
-            << std::endl;
-    }
-
-    ofs.close();
-}
-
-// [CloudMap校正诊断] 生成固定三位 merge index 文件前缀。
-std::string BuildCloudCorrectionDebugPrefix(const std::string &outputDir, const int mergeIndex) {
-    std::ostringstream oss;
-    oss << outputDir << "/cloud_merge_"
-        << std::setw(3) << std::setfill('0') << mergeIndex;
-    return oss.str();
-}
-
-// [CloudMap校正诊断] 写 CloudMap 校正前后轨迹诊断 summary。
-void WriteCloudCorrectionDebugSummary(
-    const std::string &path,
-    const int mergeIndex,
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    KeyFrame *pKFCloudStart,
-    KeyFrame *pKFCloudTail,
-    KeyFrame *pKFEdgeFrontAnchor,
-    KeyFrame *pKFEdgeBackAnchor,
-    const std::string &cloudKeyFrameSource) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Correction Debug] Failed to open summary: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    double rawZMin = 0.0;
-    double rawZMax = 0.0;
-    double rawZMean = 0.0;
-    double headZMin = 0.0;
-    double headZMax = 0.0;
-    double headZMean = 0.0;
-    double afterZMin = 0.0;
-    double afterZMax = 0.0;
-    double afterZMean = 0.0;
-
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "raw", rawZMin, rawZMax, rawZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "head", headZMin, headZMax, headZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "after", afterZMin, afterZMax, afterZMean);
-
-    const double rawPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "raw");
-    const double headPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "head");
-    const double afterPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "after");
-
-    double cloudTMin = std::numeric_limits<double>::quiet_NaN();
-    double cloudTMax = std::numeric_limits<double>::quiet_NaN();
-    if (!vSnapshots.empty()) {
-        cloudTMin = vSnapshots.front().timestamp;
-        cloudTMax = vSnapshots.back().timestamp;
-    }
-
-    double cloudStartTime = std::numeric_limits<double>::quiet_NaN();
-    double cloudEndTime = std::numeric_limits<double>::quiet_NaN();
-    double edgeFrontAnchorTime = std::numeric_limits<double>::quiet_NaN();
-    double edgeBackAnchorTime = std::numeric_limits<double>::quiet_NaN();
-    double frontTimeGap = std::numeric_limits<double>::quiet_NaN();
-    double backTimeGap = std::numeric_limits<double>::quiet_NaN();
-
-    if (pKFCloudStart != nullptr) {
-        cloudStartTime = pKFCloudStart->mTimeStamp;
-    }
-
-    if (pKFCloudTail != nullptr) {
-        cloudEndTime = pKFCloudTail->mTimeStamp;
-    }
-
-    if (pKFEdgeFrontAnchor != nullptr) {
-        edgeFrontAnchorTime = pKFEdgeFrontAnchor->mTimeStamp;
-    }
-
-    if (pKFEdgeBackAnchor != nullptr) {
-        edgeBackAnchorTime = pKFEdgeBackAnchor->mTimeStamp;
-    }
-
-    if (std::isfinite(cloudStartTime) && std::isfinite(edgeFrontAnchorTime)) {
-        frontTimeGap = std::abs(cloudStartTime - edgeFrontAnchorTime);
-    }
-
-    if (std::isfinite(cloudEndTime) && std::isfinite(edgeBackAnchorTime)) {
-        backTimeGap = std::abs(cloudEndTime - edgeBackAnchorTime);
-    }
-
-    double rawStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double rawEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double headStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double headEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double afterStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double afterEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-
-    if (!vSnapshots.empty() && pKFEdgeFrontAnchor != nullptr && pKFEdgeBackAnchor != nullptr) {
-        const Sophus::SE3f TwcEdgeFront = pKFEdgeFrontAnchor->GetPoseInverse();
-        const Sophus::SE3f TwcEdgeBack = pKFEdgeBackAnchor->GetPoseInverse();
-
-        rawStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcRaw, TwcEdgeFront);
-        rawEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcRaw, TwcEdgeBack);
-        headStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcHeadAligned, TwcEdgeFront);
-        headEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcHeadAligned, TwcEdgeBack);
-        afterStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcAfter, TwcEdgeFront);
-        afterEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcAfter, TwcEdgeBack);
-    }
-
-    double sumAfterMinusHeadZ = 0.0;
-    double sumAfterMinusRawZ = 0.0;
-    double maxAbsAfterMinusHeadZ = 0.0;
-    double maxAbsAfterMinusRawZ = 0.0;
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        const double afterMinusHeadZ =
-            static_cast<double>(vSnapshots[i].TwcAfter.translation().z() - vSnapshots[i].TwcHeadAligned.translation().z());
-        const double afterMinusRawZ =
-            static_cast<double>(vSnapshots[i].TwcAfter.translation().z() - vSnapshots[i].TwcRaw.translation().z());
-
-        sumAfterMinusHeadZ += afterMinusHeadZ;
-        sumAfterMinusRawZ += afterMinusRawZ;
-
-        if (std::abs(afterMinusHeadZ) > maxAbsAfterMinusHeadZ) {
-            maxAbsAfterMinusHeadZ = std::abs(afterMinusHeadZ);
-        }
-
-        if (std::abs(afterMinusRawZ) > maxAbsAfterMinusRawZ) {
-            maxAbsAfterMinusRawZ = std::abs(afterMinusRawZ);
-        }
-    }
-
-    double meanAfterMinusHeadZ = std::numeric_limits<double>::quiet_NaN();
-    double meanAfterMinusRawZ = std::numeric_limits<double>::quiet_NaN();
-    if (!vSnapshots.empty()) {
-        meanAfterMinusHeadZ = sumAfterMinusHeadZ / static_cast<double>(vSnapshots.size());
-        meanAfterMinusRawZ = sumAfterMinusRawZ / static_cast<double>(vSnapshots.size());
-    }
-
-    ofs << std::fixed << std::setprecision(9);
-    ofs << "[Cloud Correction Debug Summary]" << std::endl;
-    ofs << "merge_index = " << mergeIndex << std::endl;
-    ofs << "cloud_keyframe_source = " << cloudKeyFrameSource << std::endl;
-    ofs << "num_cloud_keyframes = " << vSnapshots.size() << std::endl;
-    ofs << "cloud_t_min = " << cloudTMin << std::endl;
-    ofs << "cloud_t_max = " << cloudTMax << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Anchor Info]" << std::endl;
-    ofs << "cloud_start_time = " << cloudStartTime << std::endl;
-    ofs << "cloud_end_time = " << cloudEndTime << std::endl;
-    ofs << "edge_front_anchor_time = " << edgeFrontAnchorTime << std::endl;
-    ofs << "edge_back_anchor_time = " << edgeBackAnchorTime << std::endl;
-    ofs << "front_time_gap = " << frontTimeGap << std::endl;
-    ofs << "back_time_gap = " << backTimeGap << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Boundary Position Gap]" << std::endl;
-    ofs << "raw_start_to_edge_front_gap = " << rawStartToEdgeFrontGap << std::endl;
-    ofs << "raw_end_to_edge_back_gap = " << rawEndToEdgeBackGap << std::endl;
-    ofs << "head_start_to_edge_front_gap = " << headStartToEdgeFrontGap << std::endl;
-    ofs << "head_end_to_edge_back_gap = " << headEndToEdgeBackGap << std::endl;
-    ofs << "after_start_to_edge_front_gap = " << afterStartToEdgeFrontGap << std::endl;
-    ofs << "after_end_to_edge_back_gap = " << afterEndToEdgeBackGap << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Z Statistics]" << std::endl;
-    ofs << "raw_z_min = " << rawZMin << std::endl;
-    ofs << "raw_z_max = " << rawZMax << std::endl;
-    ofs << "raw_z_mean = " << rawZMean << std::endl;
-    ofs << "head_z_min = " << headZMin << std::endl;
-    ofs << "head_z_max = " << headZMax << std::endl;
-    ofs << "head_z_mean = " << headZMean << std::endl;
-    ofs << "after_z_min = " << afterZMin << std::endl;
-    ofs << "after_z_max = " << afterZMax << std::endl;
-    ofs << "after_z_mean = " << afterZMean << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Path Length]" << std::endl;
-    ofs << "raw_path_length = " << rawPathLength << std::endl;
-    ofs << "head_path_length = " << headPathLength << std::endl;
-    ofs << "after_path_length = " << afterPathLength << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Z Correction Delta]" << std::endl;
-    ofs << "mean_after_minus_head_z = " << meanAfterMinusHeadZ << std::endl;
-    ofs << "max_abs_after_minus_head_z = " << maxAbsAfterMinusHeadZ << std::endl;
-    ofs << "mean_after_minus_raw_z = " << meanAfterMinusRawZ << std::endl;
-    ofs << "max_abs_after_minus_raw_z = " << maxAbsAfterMinusRawZ << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Interpretation Hint]" << std::endl;
-    if (std::isfinite(meanAfterMinusHeadZ)) {
-        if (std::abs(meanAfterMinusHeadZ) > kCloudCorrectionDebugZWarningThreshold) {
-            ofs << "WARNING: two-anchor correction changes CloudMap Z significantly compared with head-aligned-only trajectory." << std::endl;
-        }
-    }
-
-    if (std::isfinite(headEndToEdgeBackGap) && std::isfinite(afterEndToEdgeBackGap)) {
-        if (headEndToEdgeBackGap > kCloudCorrectionDebugBoundaryGapThreshold && afterEndToEdgeBackGap <= kCloudCorrectionDebugBoundaryGapThreshold) {
-            ofs << "Two-anchor correction mainly compensates the tail boundary residual." << std::endl;
-        }
-    }
-
-    if (std::isfinite(afterStartToEdgeFrontGap) && std::isfinite(afterEndToEdgeBackGap)) {
-        if (afterStartToEdgeFrontGap <= kCloudCorrectionDebugBoundaryGapThreshold && afterEndToEdgeBackGap <= kCloudCorrectionDebugBoundaryGapThreshold) {
-            ofs << "CloudMap boundary attachment is successful after two-anchor correction." << std::endl;
-        }
-    }
-
-    ofs.close();
-}
-
-// [CloudMap校正诊断] 写 Sim(3) 尺度对齐诊断 summary。
-void WriteCloudSim3AlignmentDebugSummary(
-    const std::string &path,
-    const int mergeIndex,
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    const CloudSim3AlignmentPairVector &vPairs,
-    const CloudSim3AlignmentResult &sim3Result,
-    KeyFrame *pKFEdgeFrontAnchor,
-    KeyFrame *pKFEdgeBackAnchor) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Sim3 Debug] Failed to open summary: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    double rawStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double rawEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double headStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double headEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double sim3StartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double sim3EndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double afterStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double afterEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-
-    if (!vSnapshots.empty() && pKFEdgeFrontAnchor != nullptr && pKFEdgeBackAnchor != nullptr) {
-        const Sophus::SE3f TwcEdgeFront = pKFEdgeFrontAnchor->GetPoseInverse();
-        const Sophus::SE3f TwcEdgeBack = pKFEdgeBackAnchor->GetPoseInverse();
-
-        rawStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcRaw, TwcEdgeFront);
-        rawEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcRaw, TwcEdgeBack);
-        headStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcHeadAligned, TwcEdgeFront);
-        headEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcHeadAligned, TwcEdgeBack);
-        afterStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcAfter, TwcEdgeFront);
-        afterEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcAfter, TwcEdgeBack);
-
-        if (vSnapshots.front().bHasSim3Aligned && vSnapshots.back().bHasSim3Aligned) {
-            sim3StartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcSim3Aligned, TwcEdgeFront);
-            sim3EndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcSim3Aligned, TwcEdgeBack);
-        }
-    }
-
-    double rawZMin = 0.0;
-    double rawZMax = 0.0;
-    double rawZMean = 0.0;
-    double headZMin = 0.0;
-    double headZMax = 0.0;
-    double headZMean = 0.0;
-    double sim3ZMin = 0.0;
-    double sim3ZMax = 0.0;
-    double sim3ZMean = 0.0;
-    double afterZMin = 0.0;
-    double afterZMax = 0.0;
-    double afterZMean = 0.0;
-
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "raw", rawZMin, rawZMax, rawZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "head", headZMin, headZMax, headZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "sim3", sim3ZMin, sim3ZMax, sim3ZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "after", afterZMin, afterZMax, afterZMean);
-
-    const double rawPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "raw");
-    const double headPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "head");
-    const double sim3PathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "sim3");
-    const double afterPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "after");
-
-    double sim3MinusHeadZSum = 0.0;
-    double afterMinusSim3ZSum = 0.0;
-    size_t sim3DeltaCount = 0;
-    for (size_t i = 0; i < vSnapshots.size(); i++) {
-        if (!vSnapshots[i].bHasSim3Aligned) {
-            continue;
-        }
-
-        sim3MinusHeadZSum += static_cast<double>(
-            vSnapshots[i].TwcSim3Aligned.translation().z() - vSnapshots[i].TwcHeadAligned.translation().z());
-        afterMinusSim3ZSum += static_cast<double>(
-            vSnapshots[i].TwcAfter.translation().z() - vSnapshots[i].TwcSim3Aligned.translation().z());
-        sim3DeltaCount++;
-    }
-
-    double sim3MinusHeadZMean = std::numeric_limits<double>::quiet_NaN();
-    double afterMinusSim3ZMean = std::numeric_limits<double>::quiet_NaN();
-    if (sim3DeltaCount > 0) {
-        sim3MinusHeadZMean = sim3MinusHeadZSum / static_cast<double>(sim3DeltaCount);
-        afterMinusSim3ZMean = afterMinusSim3ZSum / static_cast<double>(sim3DeltaCount);
-    }
-
-    ofs << std::fixed << std::setprecision(9);
-    ofs << "[Sim3 Alignment Debug Summary]" << std::endl;
-    ofs << "merge_index = " << mergeIndex << std::endl;
-    ofs << "sim3_status = " << sim3Result.status << std::endl;
-    ofs << "num_pairs = " << sim3Result.numPairs << std::endl;
-    ofs << "query_tolerance = " << kSim3FrontendPoseQueryTolerance << std::endl;
-    ofs << "scale = " << sim3Result.scale << std::endl;
-    ofs << "rotation_angle_deg = " << sim3Result.rotationAngleDeg << std::endl;
-    ofs << "translation_x = " << sim3Result.translation.x() << std::endl;
-    ofs << "translation_y = " << sim3Result.translation.y() << std::endl;
-    ofs << "translation_z = " << sim3Result.translation.z() << std::endl;
-    ofs << "rmse_before_sim3 = " << sim3Result.rmseBeforeSim3 << std::endl;
-    ofs << "rmse_after_sim3 = " << sim3Result.rmseAfterSim3 << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Boundary Gap]" << std::endl;
-    ofs << "raw_start_to_edge_front_gap = " << rawStartToEdgeFrontGap << std::endl;
-    ofs << "raw_end_to_edge_back_gap = " << rawEndToEdgeBackGap << std::endl;
-    ofs << "head_start_to_edge_front_gap = " << headStartToEdgeFrontGap << std::endl;
-    ofs << "head_end_to_edge_back_gap = " << headEndToEdgeBackGap << std::endl;
-    ofs << "sim3_start_to_edge_front_gap = " << sim3StartToEdgeFrontGap << std::endl;
-    ofs << "sim3_end_to_edge_back_gap = " << sim3EndToEdgeBackGap << std::endl;
-    ofs << "after_start_to_edge_front_gap = " << afterStartToEdgeFrontGap << std::endl;
-    ofs << "after_end_to_edge_back_gap = " << afterEndToEdgeBackGap << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Path Length]" << std::endl;
-    ofs << "raw_path_length = " << rawPathLength << std::endl;
-    ofs << "head_path_length = " << headPathLength << std::endl;
-    ofs << "sim3_path_length = " << sim3PathLength << std::endl;
-    ofs << "after_path_length = " << afterPathLength << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Z Statistics]" << std::endl;
-    ofs << "raw_z_mean = " << rawZMean << std::endl;
-    ofs << "head_z_mean = " << headZMean << std::endl;
-    ofs << "sim3_z_mean = " << sim3ZMean << std::endl;
-    ofs << "after_z_mean = " << afterZMean << std::endl;
-    ofs << "sim3_minus_head_z_mean = " << sim3MinusHeadZMean << std::endl;
-    ofs << "after_minus_sim3_z_mean = " << afterMinusSim3ZMean << std::endl;
-    ofs << std::endl;
-
-    ofs << "[Interpretation Hint]" << std::endl;
-    if (sim3Result.bOk) {
-        if (sim3Result.rmseAfterSim3 < sim3Result.rmseBeforeSim3) {
-            ofs << "Sim3 alignment improves CloudMap-to-frontend consistency." << std::endl;
-        }
-
-        if (std::isfinite(sim3EndToEdgeBackGap) && std::isfinite(headEndToEdgeBackGap)) {
-            if (headEndToEdgeBackGap - sim3EndToEdgeBackGap > kCloudCorrectionDebugBoundaryGapThreshold) {
-                ofs << "Scale-aware alignment reduces tail boundary residual." << std::endl;
-            }
-        }
-
-        if (std::isfinite(afterPathLength) && std::isfinite(sim3PathLength)) {
-            if (sim3PathLength - afterPathLength > kCloudCorrectionDebugBoundaryGapThreshold) {
-                if (afterPathLength < sim3PathLength * 0.9) {
-                    ofs << "Two-anchor correction compresses CloudMap compared with Sim3-aligned trajectory." << std::endl;
-                }
-            }
-        }
-
-        if (std::isfinite(afterMinusSim3ZMean)) {
-            if (std::abs(afterMinusSim3ZMean) > kCloudCorrectionDebugZWarningThreshold) {
-                ofs << "Two-anchor correction changes CloudMap Z compared with Sim3-aligned trajectory." << std::endl;
-            }
-        }
-    } else {
-        ofs << "Sim3 alignment was not estimated; inspect num_pairs and frontend pose cache coverage." << std::endl;
-    }
-
-    (void)vPairs;
-    ofs.close();
-}
-
-// [Sim3合并实验] 按 key = value 写 double 或 not_executed 字段。
-void WriteSelectedCorrectionDoubleOrText(
-    std::ofstream &ofs,
-    const std::string &key,
-    const double value,
-    const bool bExecuted) {
-    ofs << key << " = ";
-    if (bExecuted) {
-        ofs << value;
-    } else {
-        ofs << "not_executed";
-    }
-    ofs << std::endl;
-}
-
-// [Sim3合并实验] 写当前被选中 CloudMap 校正模式的 summary。
-void WriteCloudSelectedCorrectionSummary(
-    const std::string &path,
-    const int mergeIndex,
-    const CloudMapCorrectionMode selectedMode,
-    const CloudCorrectionDebugPoseVector &vSnapshots,
-    const CloudMergeSim3Result &sim3Result,
-    KeyFrame *pKFEdgeFrontAnchor,
-    KeyFrame *pKFEdgeBackAnchor,
-    const bool bTwoAnchorExecuted) {
-    std::ofstream ofs(path);
-    if (!ofs.is_open()) {
-        cerr << "\033[1;31m[CloudMap Selected Correction] Failed to open summary: "
-             << path << "\033[0m" << endl;
-        return;
-    }
-
-    double headZMin = 0.0;
-    double headZMax = 0.0;
-    double headZMean = 0.0;
-    double sim3ZMin = 0.0;
-    double sim3ZMax = 0.0;
-    double sim3ZMean = 0.0;
-    double selectedZMin = 0.0;
-    double selectedZMax = 0.0;
-    double selectedZMean = 0.0;
-
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "head", headZMin, headZMax, headZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "sim3", sim3ZMin, sim3ZMax, sim3ZMean);
-    ComputeCloudCorrectionDebugZStats(vSnapshots, "after", selectedZMin, selectedZMax, selectedZMean);
-
-    const double headPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "head");
-    const double sim3PathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "sim3");
-    const double selectedPathLength = ComputeCloudCorrectionDebugPathLength(vSnapshots, "after");
-    double twoAnchorPathLength = std::numeric_limits<double>::quiet_NaN();
-    if (bTwoAnchorExecuted) {
-        twoAnchorPathLength = selectedPathLength;
-    }
-
-    double selectedStartToEdgeFrontGap = std::numeric_limits<double>::quiet_NaN();
-    double selectedEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double headEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-    double twoAnchorEndToEdgeBackGap = std::numeric_limits<double>::quiet_NaN();
-
-    if (!vSnapshots.empty() && pKFEdgeFrontAnchor != nullptr && pKFEdgeBackAnchor != nullptr) {
-        const Sophus::SE3f TwcEdgeFront = pKFEdgeFrontAnchor->GetPoseInverse();
-        const Sophus::SE3f TwcEdgeBack = pKFEdgeBackAnchor->GetPoseInverse();
-
-        selectedStartToEdgeFrontGap = ComputeCloudCorrectionDebugGap(vSnapshots.front().TwcAfter, TwcEdgeFront);
-        selectedEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcAfter, TwcEdgeBack);
-        headEndToEdgeBackGap = ComputeCloudCorrectionDebugGap(vSnapshots.back().TwcHeadAligned, TwcEdgeBack);
-        if (bTwoAnchorExecuted) {
-            twoAnchorEndToEdgeBackGap = selectedEndToEdgeBackGap;
-        }
-    }
-
-    ofs << std::fixed << std::setprecision(9);
-    ofs << "[Selected Cloud Correction Summary]" << std::endl;
-    ofs << "merge_index = " << mergeIndex << std::endl;
-    ofs << "selected_mode = " << GetCloudMapCorrectionModeName(selectedMode) << std::endl;
-    ofs << "num_cloud_keyframes = " << vSnapshots.size() << std::endl;
-    ofs << "num_sim3_pairs = " << sim3Result.numPairs << std::endl;
-    ofs << "sim3_scale = " << sim3Result.scale << std::endl;
-    ofs << "sim3_rmse_before = " << sim3Result.rmseBefore << std::endl;
-    ofs << "sim3_rmse_after = " << sim3Result.rmseAfter << std::endl;
-    if (!sim3Result.failureReason.empty()) {
-        ofs << "sim3_failure_reason = " << sim3Result.failureReason << std::endl;
-    }
-    ofs << std::endl;
-
-    ofs << "[Boundary Gap]" << std::endl;
-    ofs << "selected_start_to_edge_front_gap = " << selectedStartToEdgeFrontGap << std::endl;
-    ofs << "selected_end_to_edge_back_gap = " << selectedEndToEdgeBackGap << std::endl;
-    ofs << "head_end_to_edge_back_gap = " << headEndToEdgeBackGap << std::endl;
-    WriteSelectedCorrectionDoubleOrText(ofs, "two_anchor_end_to_edge_back_gap", twoAnchorEndToEdgeBackGap, bTwoAnchorExecuted);
-    ofs << std::endl;
-
-    ofs << "[Path Length]" << std::endl;
-    ofs << "head_path_length = " << headPathLength << std::endl;
-    ofs << "sim3_path_length = " << sim3PathLength << std::endl;
-    ofs << "selected_path_length = " << selectedPathLength << std::endl;
-    WriteSelectedCorrectionDoubleOrText(ofs, "two_anchor_path_length", twoAnchorPathLength, bTwoAnchorExecuted);
-    ofs << std::endl;
-
-    ofs << "[Z Statistics]" << std::endl;
-    ofs << "head_z_mean = " << headZMean << std::endl;
-    ofs << "sim3_z_mean = " << sim3ZMean << std::endl;
-    ofs << "selected_z_mean = " << selectedZMean << std::endl;
-    WriteSelectedCorrectionDoubleOrText(ofs, "two_anchor_z_mean", selectedZMean, bTwoAnchorExecuted);
-    ofs << std::endl;
-
-    ofs << "[Interpretation Hint]" << std::endl;
-    if (selectedMode == CloudMapCorrectionMode::SIM3_ONLY) {
-        ofs << "SIM3_ONLY selected: CloudMap is aligned using scale-aware Sim(3). Two-anchor SE(3) residual interpolation is not applied." << std::endl;
-    }
-
-    if (std::isfinite(selectedStartToEdgeFrontGap)) {
-        if (selectedStartToEdgeFrontGap > kCloudMergeSim3MaxBoundaryGap) {
-            ofs << "WARNING: selected correction start boundary gap is larger than threshold." << std::endl;
-        }
-    }
-
-    if (std::isfinite(selectedEndToEdgeBackGap)) {
-        if (selectedEndToEdgeBackGap > kCloudMergeSim3MaxBoundaryGap) {
-            ofs << "WARNING: selected correction end boundary gap is larger than threshold." << std::endl;
-        }
-    }
-
-    ofs.close();
-}
-
 
 // [阶段2B修改] 退化场景下使用时间线性权重，保持原有首尾插值业务逻辑。
 double ComputeTimeLinearCorrectionWeight(const double timestamp, const double tStart, const double tEnd) {
@@ -1710,8 +328,7 @@ CloudMerging::CloudMerging(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *
     mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
     mbStopGBA(false), mpThreadGBA(nullptr), mbFixScale(bFixScale), mnFullBAIdx(0), mnMergeNumCoincidences(0),
     mbMergeDetected(false), mnMergeNumNotFound(0), mbActiveCM(bActiveLC), mbMergeAnyway(bMergeAnyway), mbWork(bWork),
-    mpMapDrawer(pMapDrawer), mpFrameDrawer(pFrameDrawer), mbOldUdf(bOldUdf), mbNewUdf(bNewUdf),
-    mnCloudMergeDebugOutputIndex(0) {
+    mpMapDrawer(pMapDrawer), mpFrameDrawer(pFrameDrawer), mbOldUdf(bOldUdf), mbNewUdf(bNewUdf) {
     
     mnCovisibilityConsistencyTh = 3;
     mpLastCurrentKF = static_cast<KeyFrame *>(NULL);
@@ -1731,12 +348,6 @@ void CloudMerging::SetLocalMapper(LocalMapping *pLocalMapper) {
 
 void CloudMerging::SetLoopClosing(LoopClosing *pLoopClosing) {
     mpLoopClosing = pLoopClosing;
-}
-
-void CloudMerging::SetCloudMergeDebugOutputDir(const std::string &debugOutputDir) {
-    // [CloudMap校正诊断] 保存结果目录，供 CloudMap 校正前后轨迹诊断输出使用。
-    std::lock_guard<std::mutex> lock(mMutexCloudMergeDebugOutputDir);
-    mCloudMergeDebugOutputDir = debugOutputDir;
 }
 
 void CloudMerging::Run(bool bOnline) { 
@@ -1850,9 +461,6 @@ void CloudMerging::Run(bool bOnline) {
                 continue; 
             }
 
-            // [Sim3合并实验] SIM3_ONLY 失败时不自动 fallback 到旧 two-anchor 逻辑，避免实验结果混淆。
-            bool bSkipCloudMergeDueToCorrectionFailure = false;
-
             if (mbOldUdf || mbNewUdf) {
                 if (mpEdgeFrontCloudKeyFrameMatch.size() > 0) {
                     
@@ -1936,333 +544,143 @@ void CloudMerging::Run(bool bOnline) {
                                         Sophus::Sim3d delta_T = Sim3_eb * Sim3_cloud_tail_rigid.inverse();
                                         Eigen::Matrix<double, 7, 1> xi = delta_T.log();
 
-                                        // [CloudMap校正诊断] 在真正 SetPose 前缓存 raw 与 head-aligned-only 虚拟轨迹。
-                                        std::string cloudCorrectionDebugOutputDir;
-                                        int cloudCorrectionDebugMergeIndex = 0;
-                                        {
-                                            std::lock_guard<std::mutex> lock(mMutexCloudMergeDebugOutputDir);
-                                            cloudCorrectionDebugOutputDir = mCloudMergeDebugOutputDir;
-                                            if (!cloudCorrectionDebugOutputDir.empty()) {
-                                                mnCloudMergeDebugOutputIndex++;
-                                                cloudCorrectionDebugMergeIndex = mnCloudMergeDebugOutputIndex;
-                                            }
-                                        }
+                                        // [阶段2B修改] 构造 CloudMap 首尾残差分配权重。
+                                        // [阶段2B回退修改] 通过模式开关选择 TIME_LINEAR / MOTION_ARC / FRONTEND_CONSISTENCY。
+                                        std::map<KeyFrame *, double> cloudKeyFrameCorrectionWeight;
+                                        bool bUsedFrontendConsistency = false;
+                                        bool bBuildCorrectionWeight = false;
 
-                                        CloudCorrectionDebugPoseVector cloudCorrectionDebugSnapshots;
-                                        CloudSim3AlignmentPairVector cloudSim3AlignmentPairs;
-                                        CloudSim3AlignmentResult cloudSim3AlignmentResult =
-                                            MakeCloudSim3AlignmentResult("not_requested");
-                                        std::string cloudCorrectionDebugPrefix;
-                                        if (!cloudCorrectionDebugOutputDir.empty()) {
-                                            std::vector<KeyFrame *> vSortedCloudDebugKeyFrames =
-                                                BuildSortedCloudDebugKeyFrames(cloudMapKeyFrames);
-                                            cloudCorrectionDebugSnapshots =
-                                                BuildCloudCorrectionDebugSnapshots(vSortedCloudDebugKeyFrames, S_head);
-                                            cloudSim3AlignmentPairs =
-                                                BuildCloudSim3AlignmentPairs(cloudCorrectionDebugSnapshots);
-                                            cloudSim3AlignmentResult =
-                                                EstimateCloudSim3Alignment(cloudSim3AlignmentPairs);
-                                            FillCloudSim3AlignedDebugPose(
-                                                cloudCorrectionDebugSnapshots,
-                                                cloudSim3AlignmentResult);
-                                            cloudCorrectionDebugPrefix =
-                                                BuildCloudCorrectionDebugPrefix(cloudCorrectionDebugOutputDir, cloudCorrectionDebugMergeIndex);
-                                        }
-
-                                        CloudMergeSim3Result cloudMergeSim3Result = MakeCloudMergeSim3Result();
-                                        bool bTwoAnchorExecuted = false;
-                                        bool bSim3OnlyExecuted = false;
-                                        bool bSelectedCorrectionApplied = false;
-
-                                        if (kCloudMapCorrectionMode == CloudMapCorrectionMode::SIM3_ONLY) {
-                                            // [Sim3合并实验] 使用 CloudMap/frontend 对应点估计 Sim(3)，并直接写回 CloudMap。
-                                            std::vector<double> matchedTimestamps;
-                                            std::vector<unsigned long> matchedKeyFrameIds;
-                                            std::vector<Eigen::Vector3f> cloudPoints;
-                                            std::vector<Eigen::Vector3f> frontendPoints;
-                                            std::vector<double> timeGaps;
-
-                                            const bool bSim3Ok = EstimateCloudToFrontendSim3(
+                                        if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::TIME_LINEAR) {
+                                            // [阶段2B回退修改] 当前默认稳定基线：不使用 motion-arc，不使用 OKVIS frontend consistency。
+                                            bBuildCorrectionWeight = BuildTimeLinearCorrectionWeights(
                                                 cloudMapKeyFrames,
-                                                cloudMergeSim3Result,
-                                                matchedTimestamps,
-                                                matchedKeyFrameIds,
-                                                cloudPoints,
-                                                frontendPoints,
-                                                timeGaps);
+                                                t_start,
+                                                t_end,
+                                                cloudKeyFrameCorrectionWeight);
 
-                                            if (bSim3Ok) {
-                                                const bool bApplyOk = ApplySim3ToCloudMap(
-                                                    mpCurrentCloudMap,
-                                                    cloudMapKeyFrames,
-                                                    cloudMergeSim3Result);
+                                            cerr << "\033[1;32m[CloudMerging] UDF correction uses TIME-LINEAR weights because it is the current stable baseline.\033[0m" << endl;
+                                        } else if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::MOTION_ARC) {
+                                            // [阶段2B回退修改] 阶段2A运动弧长权重，仅用于消融实验。
+                                            bBuildCorrectionWeight = BuildMotionArcCorrectionWeights(
+                                                cloudMapKeyFrames,
+                                                t_start,
+                                                t_end,
+                                                cloudKeyFrameCorrectionWeight,
+                                                false,
+                                                bUsedFrontendConsistency);
 
-                                                if (bApplyOk) {
-                                                    bSim3OnlyExecuted = true;
-                                                    bSelectedCorrectionApplied = true;
-
-                                                    std::cout << "[CloudMerging][Sim3] SIM3_ONLY correction applied. scale = "
-                                                              << cloudMergeSim3Result.scale
-                                                              << ", pairs = "
-                                                              << cloudMergeSim3Result.numPairs
-                                                              << ", rmse before = "
-                                                              << cloudMergeSim3Result.rmseBefore
-                                                              << ", rmse after = "
-                                                              << cloudMergeSim3Result.rmseAfter
-                                                              << std::endl;
-
-                                                    const Sophus::SE3f TwcCloudStartAfter = pKF_CloudStart->GetPoseInverse();
-                                                    const Sophus::SE3f TwcCloudTailAfter = pKF_CloudTail->GetPoseInverse();
-                                                    const double sim3StartToEdgeFrontGap =
-                                                        ComputeCloudCorrectionDebugGap(TwcCloudStartAfter, pKF_EdgeFrontEnd->GetPoseInverse());
-                                                    const double sim3EndToEdgeBackGap =
-                                                        ComputeCloudCorrectionDebugGap(TwcCloudTailAfter, pKF_EdgeBackHead->GetPoseInverse());
-
-                                                    if (sim3StartToEdgeFrontGap > kCloudMergeSim3MaxBoundaryGap) {
-                                                        std::cout << "[CloudMerging][Sim3][WARNING] sim3_start_to_edge_front_gap = "
-                                                                  << sim3StartToEdgeFrontGap
-                                                                  << " exceeds threshold "
-                                                                  << kCloudMergeSim3MaxBoundaryGap
-                                                                  << std::endl;
-                                                    }
-
-                                                    if (sim3EndToEdgeBackGap > kCloudMergeSim3MaxBoundaryGap) {
-                                                        std::cout << "[CloudMerging][Sim3][WARNING] sim3_end_to_edge_back_gap = "
-                                                                  << sim3EndToEdgeBackGap
-                                                                  << " exceeds threshold "
-                                                                  << kCloudMergeSim3MaxBoundaryGap
-                                                                  << std::endl;
-                                                    }
-                                                } else {
-                                                    cloudMergeSim3Result.failureReason = "apply_failed";
-                                                }
-                                            }
-
-                                            if (!bSelectedCorrectionApplied) {
-                                                std::cout << "[CloudMerging][Sim3][ERROR] SIM3_ONLY correction failed: "
-                                                          << cloudMergeSim3Result.failureReason
-                                                          << std::endl;
-                                                bSkipCloudMergeDueToCorrectionFailure = true;
-                                            }
-                                        } else if (kCloudMapCorrectionMode == CloudMapCorrectionMode::SE3_TIME_LINEAR_TWO_ANCHOR) {
-                                            // [Sim3合并实验] 保留旧逻辑：严格双锚点 + TIME-LINEAR 残差插值。
-                                            // [阶段2B修改] 构造 CloudMap 首尾残差分配权重。
-                                            // [阶段2B回退修改] 通过模式开关选择 TIME_LINEAR / MOTION_ARC / FRONTEND_CONSISTENCY。
-                                            std::map<KeyFrame *, double> cloudKeyFrameCorrectionWeight;
-                                            bool bUsedFrontendConsistency = false;
-                                            bool bBuildCorrectionWeight = false;
-
-                                            if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::TIME_LINEAR) {
-                                                // [阶段2B回退修改] 当前默认稳定基线：不使用 motion-arc，不使用 OKVIS frontend consistency。
-                                                bBuildCorrectionWeight = BuildTimeLinearCorrectionWeights(
-                                                    cloudMapKeyFrames,
-                                                    t_start,
-                                                    t_end,
-                                                    cloudKeyFrameCorrectionWeight);
-
-                                                cerr << "\033[1;32m[CloudMerging] UDF correction uses TIME-LINEAR weights because it is the current stable baseline.\033[0m" << endl;
-                                            } else if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::MOTION_ARC) {
-                                                // [阶段2B回退修改] 阶段2A运动弧长权重，仅用于消融实验。
-                                                bBuildCorrectionWeight = BuildMotionArcCorrectionWeights(
-                                                    cloudMapKeyFrames,
-                                                    t_start,
-                                                    t_end,
-                                                    cloudKeyFrameCorrectionWeight,
-                                                    false,
-                                                    bUsedFrontendConsistency);
-
-                                                if (bBuildCorrectionWeight) {
-                                                    cerr << "\033[1;32m[CloudMerging] UDF correction uses MOTION-ARC weights for ablation. "
-                                                         << "rotation weight = " << kCloudMergeRotationMotionWeight
-                                                         << "\033[0m" << endl;
-                                                } else {
-                                                    cerr << "\033[1;33m[CloudMerging] UDF correction falls back to time-linear weights because motion arc is degenerate.\033[0m" << endl;
-                                                }
-                                            } else if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::FRONTEND_CONSISTENCY) {
-                                                // [阶段2B回退修改] 阶段2B前端一致性权重保留为实验模式，默认不启用。
-                                                bBuildCorrectionWeight = BuildMotionArcCorrectionWeights(
-                                                    cloudMapKeyFrames,
-                                                    t_start,
-                                                    t_end,
-                                                    cloudKeyFrameCorrectionWeight,
-                                                    true,
-                                                    bUsedFrontendConsistency);
-
-                                                if (bBuildCorrectionWeight) {
-                                                    cerr << "\033[1;32m[CloudMerging] UDF correction uses FRONTEND-CONSISTENCY experimental weights. "
-                                                         << "rotation weight = " << kCloudMergeRotationMotionWeight;
-                                                    if (bUsedFrontendConsistency) {
-                                                        cerr << ", frontend consistency = enabled";
-                                                    } else {
-                                                        cerr << ", frontend consistency = unavailable";
-                                                    }
-                                                    cerr << "\033[0m" << endl;
-                                                } else {
-                                                    cerr << "\033[1;33m[CloudMerging] UDF correction falls back to time-linear weights because frontend-consistency motion arc is degenerate.\033[0m" << endl;
-                                                }
+                                            if (bBuildCorrectionWeight) {
+                                                cerr << "\033[1;32m[CloudMerging] UDF correction uses MOTION-ARC weights for ablation. "
+                                                     << "rotation weight = " << kCloudMergeRotationMotionWeight
+                                                     << "\033[0m" << endl;
                                             } else {
-                                                // [阶段2B回退修改] 防御性兜底：未知模式时回到时间线性权重。
-                                                bBuildCorrectionWeight = BuildTimeLinearCorrectionWeights(
-                                                    cloudMapKeyFrames,
-                                                    t_start,
-                                                    t_end,
-                                                    cloudKeyFrameCorrectionWeight);
+                                                cerr << "\033[1;33m[CloudMerging] UDF correction falls back to time-linear weights because motion arc is degenerate.\033[0m" << endl;
+                                            }
+                                        } else if (kCloudCorrectionWeightMode == CloudCorrectionWeightMode::FRONTEND_CONSISTENCY) {
+                                            // [阶段2B回退修改] 阶段2B前端一致性权重保留为实验模式，默认不启用。
+                                            bBuildCorrectionWeight = BuildMotionArcCorrectionWeights(
+                                                cloudMapKeyFrames,
+                                                t_start,
+                                                t_end,
+                                                cloudKeyFrameCorrectionWeight,
+                                                true,
+                                                bUsedFrontendConsistency);
 
-                                                cerr << "\033[1;33m[CloudMerging] UDF correction falls back to TIME-LINEAR weights because weight mode is unknown.\033[0m" << endl;
+                                            if (bBuildCorrectionWeight) {
+                                                cerr << "\033[1;32m[CloudMerging] UDF correction uses FRONTEND-CONSISTENCY experimental weights. "
+                                                     << "rotation weight = " << kCloudMergeRotationMotionWeight;
+                                                if (bUsedFrontendConsistency) {
+                                                    cerr << ", frontend consistency = enabled";
+                                                } else {
+                                                    cerr << ", frontend consistency = unavailable";
+                                                }
+                                                cerr << "\033[0m" << endl;
+                                            } else {
+                                                cerr << "\033[1;33m[CloudMerging] UDF correction falls back to time-linear weights because frontend-consistency motion arc is degenerate.\033[0m" << endl;
+                                            }
+                                        } else {
+                                            // [阶段2B回退修改] 防御性兜底：未知模式时回到时间线性权重。
+                                            bBuildCorrectionWeight = BuildTimeLinearCorrectionWeights(
+                                                cloudMapKeyFrames,
+                                                t_start,
+                                                t_end,
+                                                cloudKeyFrameCorrectionWeight);
+
+                                            cerr << "\033[1;33m[CloudMerging] UDF correction falls back to TIME-LINEAR weights because weight mode is unknown.\033[0m" << endl;
+                                        }
+
+                                        if (!bBuildCorrectionWeight) {
+                                            // [阶段2B回退修改] 没有可用有效 KeyFrame 时仍保留原查询兜底，避免空表影响后续流程。
+                                            cerr << "\033[1;33m[CloudMerging] UDF correction weight table is empty; per-frame fallback remains time-linear.\033[0m" << endl;
+                                        }
+
+                                        // [阶段2B修改] 查询单个 KeyFrame 的补偿权重；缺失时退回时间线性权重。
+                                        // [阶段2B回退修改] TIME_LINEAR 默认模式下该 lambda 返回 BuildTimeLinearCorrectionWeights 生成的权重。
+                                        auto getCloudCorrectionWeight = [&](KeyFrame *pKF) -> double {
+                                            if (pKF == nullptr) {
+                                                return 0.0;
                                             }
 
-                                            if (!bBuildCorrectionWeight) {
-                                                // [阶段2B回退修改] 没有可用有效 KeyFrame 时仍保留原查询兜底，避免空表影响后续流程。
-                                                cerr << "\033[1;33m[CloudMerging] UDF correction weight table is empty; per-frame fallback remains time-linear.\033[0m" << endl;
+                                            auto weightIter = cloudKeyFrameCorrectionWeight.find(pKF);
+                                            if (weightIter != cloudKeyFrameCorrectionWeight.end()) {
+                                                return weightIter->second;
                                             }
 
-                                            // [阶段2B修改] 查询单个 KeyFrame 的补偿权重；缺失时退回时间线性权重。
-                                            // [阶段2B回退修改] TIME_LINEAR 默认模式下该 lambda 返回 BuildTimeLinearCorrectionWeights 生成的权重。
-                                            auto getCloudCorrectionWeight = [&](KeyFrame *pKF) -> double {
-                                                if (pKF == nullptr) {
-                                                    return 0.0;
-                                                }
+                                            return ComputeTimeLinearCorrectionWeight(pKF->mTimeStamp, t_start, t_end);
+                                        };
 
-                                                auto weightIter = cloudKeyFrameCorrectionWeight.find(pKF);
-                                                if (weightIter != cloudKeyFrameCorrectionWeight.end()) {
-                                                    return weightIter->second;
-                                                }
+                                        // =================================================================================
+                                        // 【阶段 3：劫持 CloudMap 关键帧，执行 双锚点复合扭曲】
+                                        // =================================================================================
+                                        for (size_t i = 0; i < cloudMapKeyFrames.size(); i++) {
+                                            KeyFrame* pKFi = cloudMapKeyFrames[i];
+                                            if (IsValidCloudMergeKeyFrame(pKFi)) {
+                                                // [阶段2B修改] 使用前端位姿一致性加权后的 CloudMap 补偿权重。
+                                                const double w_i = getCloudCorrectionWeight(pKFi);
 
-                                                return ComputeTimeLinearCorrectionWeight(pKF->mTimeStamp, t_start, t_end);
-                                            };
+                                                Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
+                                                Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
 
-                                            // =================================================================================
-                                            // 【阶段 3：劫持 CloudMap 关键帧，执行 双锚点复合扭曲】
-                                            // =================================================================================
-                                            for (size_t i = 0; i < cloudMapKeyFrames.size(); i++) {
-                                                KeyFrame* pKFi = cloudMapKeyFrames[i];
-                                                if (IsValidCloudMergeKeyFrame(pKFi)) {
-                                                    // [阶段2B修改] 使用前端位姿一致性加权后的 CloudMap 补偿权重。
-                                                    const double w_i = getCloudCorrectionWeight(pKFi);
+                                                Sophus::SE3f T_cloud_i_Twc = pKFi->GetPoseInverse();
+                                                Sophus::Sim3d Sim3_cloud_i(T_cloud_i_Twc.unit_quaternion().cast<double>(), T_cloud_i_Twc.translation().cast<double>());
+                                                Sim3_cloud_i.setScale(1.0);
 
-                                                    Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
-                                                    Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
+                                                // 【终极方程】：纠正后坐标 = 伸缩扭曲(T_scale_i) * 基准搬运(S_head) * 原始坐标(Sim3_cloud_i)
+                                                Sophus::Sim3d Sim3_corrected = T_scale_i * S_head * Sim3_cloud_i;
 
-                                                    Sophus::SE3f T_cloud_i_Twc = pKFi->GetPoseInverse();
-                                                    Sophus::Sim3d Sim3_cloud_i(T_cloud_i_Twc.unit_quaternion().cast<double>(), T_cloud_i_Twc.translation().cast<double>());
-                                                    Sim3_cloud_i.setScale(1.0);
-
-                                                    // 【终极方程】：纠正后坐标 = 伸缩扭曲(T_scale_i) * 基准搬运(S_head) * 原始坐标(Sim3_cloud_i)
-                                                    Sophus::Sim3d Sim3_corrected = T_scale_i * S_head * Sim3_cloud_i;
-
-                                                    Sophus::SE3f T_corrected_Twc(Sim3_corrected.rotationMatrix().cast<float>(), Sim3_corrected.translation().cast<float>());
-                                                    pKFi->SetPose(T_corrected_Twc.inverse());
-                                                }
+                                                Sophus::SE3f T_corrected_Twc(Sim3_corrected.rotationMatrix().cast<float>(), Sim3_corrected.translation().cast<float>());
+                                                pKFi->SetPose(T_corrected_Twc.inverse());
                                             }
+                                        }
 
-                                            // =================================================================================
-                                            // 【阶段 4：劫持 UDF 点云，套用完全相同的双锚点方程】
-                                            // =================================================================================
-                                            const vector<MapPoint*> &cloudMPs = mpCurrentCloudMap->GetAllMapPoints();
-                                            for (size_t j = 0; j < cloudMPs.size(); j++) {
-                                                MapPoint* pMP = cloudMPs[j];
-                                                if (pMP) {
-                                                    if (!pMP->isBad()) {
-                                                        KeyFrame* pRefKF = pMP->GetReferenceKeyFrame();
-                                                        if (IsValidCloudMergeKeyFrame(pRefKF)) {
-                                                            // [阶段2B修改] MapPoint 跟随其参考 KeyFrame 使用同一补偿权重。
-                                                            const double w_i = getCloudCorrectionWeight(pRefKF);
+                                        // =================================================================================
+                                        // 【阶段 4：劫持 UDF 点云，套用完全相同的双锚点方程】
+                                        // =================================================================================
+                                        const vector<MapPoint*> &cloudMPs = mpCurrentCloudMap->GetAllMapPoints();
+                                        for (size_t j = 0; j < cloudMPs.size(); j++) {
+                                            MapPoint* pMP = cloudMPs[j];
+                                            if (pMP) {
+                                                if (!pMP->isBad()) {
+                                                    KeyFrame* pRefKF = pMP->GetReferenceKeyFrame();
+                                                    if (IsValidCloudMergeKeyFrame(pRefKF)) {
+                                                        // [阶段2B修改] MapPoint 跟随其参考 KeyFrame 使用同一补偿权重。
+                                                        const double w_i = getCloudCorrectionWeight(pRefKF);
 
-                                                            Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
-                                                            Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
+                                                        Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
+                                                        Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
 
-                                                            Eigen::Vector3d P3Dw = pMP->GetWorldPos().cast<double>();
-
-                                                            // 同样必须先进行 S_head 搬运，再进行拉伸扭曲
-                                                            Eigen::Vector3d P3D_corrected = T_scale_i * S_head * P3Dw;
-
-                                                            pMP->SetWorldPos(P3D_corrected.cast<float>());
-                                                            pMP->UpdateNormalAndDepth();
-                                                        }
+                                                        Eigen::Vector3d P3Dw = pMP->GetWorldPos().cast<double>();
+                                                        
+                                                        // 同样必须先进行 S_head 搬运，再进行拉伸扭曲
+                                                        Eigen::Vector3d P3D_corrected = T_scale_i * S_head * P3Dw;
+                                                        
+                                                        pMP->SetWorldPos(P3D_corrected.cast<float>());
+                                                        pMP->UpdateNormalAndDepth();
                                                     }
                                                 }
                                             }
-                                            bTwoAnchorExecuted = true;
-                                            bSelectedCorrectionApplied = true;
-                                            cerr << "\033[1;32m[CloudMerging] Sim3 Lie-Algebra Manifold Smoothing (With Base Alignment) Successfully Applied!\033[0m" << endl;
-                                        } else if (kCloudMapCorrectionMode == CloudMapCorrectionMode::SIM3_PLUS_RESIDUAL_RESERVED) {
-                                            // [Sim3合并实验] 预留模式暂不实现，避免与 SIM3_ONLY 实验结果混淆。
-                                            cloudMergeSim3Result.failureReason = "sim3_plus_residual_reserved";
-                                            bSkipCloudMergeDueToCorrectionFailure = true;
-                                            std::cout << "[CloudMerging][Sim3][ERROR] SIM3_PLUS_RESIDUAL_RESERVED is not implemented." << std::endl;
-                                        } else {
-                                            // [Sim3合并实验] 未知模式不自动 fallback。
-                                            cloudMergeSim3Result.failureReason = "unknown_correction_mode";
-                                            bSkipCloudMergeDueToCorrectionFailure = true;
-                                            std::cout << "[CloudMerging][Sim3][ERROR] Unknown CloudMap correction mode." << std::endl;
                                         }
-
-                                        if (!cloudCorrectionDebugOutputDir.empty()) {
-                                            // [CloudMap校正诊断] 读取校正后的实际 KeyFrame 位姿并输出诊断文件，不改变业务逻辑。
-                                            FillCloudCorrectionDebugAfterPose(cloudCorrectionDebugSnapshots);
-                                            WriteCloudCorrectionDebugTum(
-                                                cloudCorrectionDebugPrefix + "_raw_original.txt",
-                                                cloudCorrectionDebugSnapshots,
-                                                "raw");
-                                            WriteCloudCorrectionDebugTum(
-                                                cloudCorrectionDebugPrefix + "_head_aligned_only.txt",
-                                                cloudCorrectionDebugSnapshots,
-                                                "head");
-                                            WriteCloudCorrectionDebugTum(
-                                                cloudCorrectionDebugPrefix + "_sim3_aligned_only.txt",
-                                                cloudCorrectionDebugSnapshots,
-                                                "sim3");
-                                            WriteCloudCorrectionDebugTum(
-                                                cloudCorrectionDebugPrefix + "_after_two_anchor_correction.txt",
-                                                cloudCorrectionDebugSnapshots,
-                                                "after");
-                                            if (bSim3OnlyExecuted) {
-                                                WriteCloudCorrectionDebugTum(
-                                                    cloudCorrectionDebugPrefix + "_after_sim3_only_correction.txt",
-                                                    cloudCorrectionDebugSnapshots,
-                                                    "after");
-                                            }
-                                            WriteCloudCorrectionDebugTum(
-                                                cloudCorrectionDebugPrefix + "_after_selected_correction.txt",
-                                                cloudCorrectionDebugSnapshots,
-                                                "after");
-                                            WriteCloudCorrectionDebugCsv(
-                                                cloudCorrectionDebugPrefix + "_correction_debug.csv",
-                                                cloudCorrectionDebugSnapshots);
-                                            WriteCloudSim3AlignmentPairsCsv(
-                                                cloudCorrectionDebugPrefix + "_sim3_alignment_pairs.csv",
-                                                cloudSim3AlignmentPairs);
-                                            WriteCloudCorrectionDebugSummary(
-                                                cloudCorrectionDebugPrefix + "_correction_debug_summary.txt",
-                                                cloudCorrectionDebugMergeIndex,
-                                                cloudCorrectionDebugSnapshots,
-                                                pKF_CloudStart,
-                                                pKF_CloudTail,
-                                                pKF_EdgeFrontEnd,
-                                                pKF_EdgeBackHead,
-                                                "vCloudKeyFrames");
-                                            WriteCloudSim3AlignmentDebugSummary(
-                                                cloudCorrectionDebugPrefix + "_sim3_alignment_debug_summary.txt",
-                                                cloudCorrectionDebugMergeIndex,
-                                                cloudCorrectionDebugSnapshots,
-                                                cloudSim3AlignmentPairs,
-                                                cloudSim3AlignmentResult,
-                                                pKF_EdgeFrontEnd,
-                                                pKF_EdgeBackHead);
-                                            WriteCloudSelectedCorrectionSummary(
-                                                cloudCorrectionDebugPrefix + "_selected_correction_summary.txt",
-                                                cloudCorrectionDebugMergeIndex,
-                                                kCloudMapCorrectionMode,
-                                                cloudCorrectionDebugSnapshots,
-                                                cloudMergeSim3Result,
-                                                pKF_EdgeFrontEnd,
-                                                pKF_EdgeBackHead,
-                                                bTwoAnchorExecuted);
-
-                                            cerr << "\033[1;32m[CloudMap Correction Debug] Saved merge diagnostics: "
-                                                 << cloudCorrectionDebugPrefix
-                                                 << "_*.txt/csv\033[0m" << endl;
-                                        }
+                                        cerr << "\033[1;32m[CloudMerging] Sim3 Lie-Algebra Manifold Smoothing (With Base Alignment) Successfully Applied!\033[0m" << endl;
                                     } else {
                                         cerr << "\033[1;33m[CloudMerging] Warning: Time inversion detected, bypass smoothing.\033[0m" << endl;
                                     }
@@ -2297,9 +715,7 @@ void CloudMerging::Run(bool bOnline) {
             // bool bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
             bool bComputeEdgeFront = false;
 
-            if (bSkipCloudMergeDueToCorrectionFailure) {
-                std::cout << "[CloudMerging][Sim3][ERROR] Skip CloudMergeMap because selected CloudMap correction failed." << std::endl;
-            } else if (mbOldUdf || mbNewUdf) {
+            if (mbOldUdf || mbNewUdf) {
                 // 【核心修复：绝对单位阵注入，锁定平滑后的 CloudMap】
                 // 此时 CloudMap 已经在内存中通过 Sim(3) 插值补偿被完美掰弯，首尾已经贴合红圈。
                 // 注入单位阵，防止原生的 ComputeSubmapSim3 因为伪造特征点产生错误的拉扯。
@@ -2311,7 +727,7 @@ void CloudMerging::Run(bool bOnline) {
             }
 
             // ***************** 第四步，Merge Map *****************
-            if (!bSkipCloudMergeDueToCorrectionFailure && (bComputeEdgeFront || mbMergeAnyway)) {
+            if (bComputeEdgeFront || mbMergeAnyway) {
                 Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
 
                 bool bRelaunchBA = false;
@@ -2330,7 +746,6 @@ void CloudMerging::Run(bool bOnline) {
 
                 // Merge !!!
                 CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
-
                 mpAtlas->RemoveBadMaps();
 
                 if (bRelaunchBA) {
@@ -2456,7 +871,6 @@ void CloudMerging::Run(bool bOnline) {
 
                     // Merge !!!
                     CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
-
                     delete mpCurrentCloudMap; 
                     
                     if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
