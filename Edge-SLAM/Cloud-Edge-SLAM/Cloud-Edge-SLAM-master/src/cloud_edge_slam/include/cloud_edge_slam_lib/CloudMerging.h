@@ -46,7 +46,7 @@ public:
     void SetLocalMapper(LocalMapping *pLocalMapper);
     void SetLoopClosing(LoopClosing *pLoopClosing);
 
-    // [CloudMap校正诊断] 设置 CloudMap 校正前后轨迹调试输出目录。
+    // [CloudMap校正诊断] 设置 CloudMap 校正统计 summary 输出目录。
     void SetCloudMergeDebugOutputDir(const std::string &debugOutputDir);
 
     // Get Variables
@@ -236,7 +236,7 @@ protected:
     int mnNumCorrection;
     int mnCorrectionGBA;
 
-    // [CloudMap校正诊断] 输出 CloudMap 校正前后轨迹诊断文件。
+    // [CloudMap校正诊断] 输出 CloudMap 校正统计 summary。
     std::string mCloudMergeDebugOutputDir;
     int mnCloudMergeDebugOutputIndex;
     std::mutex mMutexCloudMergeDebugOutputDir;

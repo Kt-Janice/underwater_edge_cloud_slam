@@ -7,6 +7,7 @@ summary CSV/TXT files into the selected result directory.
 
 import argparse
 import csv
+import glob
 import math
 import os
 from dataclasses import dataclass
@@ -23,141 +24,58 @@ TIME_BALANCED_BIN_SECONDS = 0.5
 SIGNIFICANT_Z_ERROR_M = 0.02
 SIGNIFICANT_ANGLE_DEG = 1.0
 
-EXPECTED_INPUT_FILES = [
+CORE_INPUT_FILES = [
     "whole_map.txt",
-    "whole_map_sorted_unique.txt",
     "whole_map_no_cloud.txt",
     "whole_map_cloud_only.txt",
+    "okvis_full_traj.txt",
+]
+
+OPTIONAL_LEGACY_TUM_FILES = [
+    "okvis_wrapper.txt",
+    "whole_map_sorted_unique.txt",
     "map_1_all.txt",
     "map_1_edge_only.txt",
     "map_1_cloud_only.txt",
     "map_2_all.txt",
     "map_2_edge_only.txt",
     "map_2_cloud_only.txt",
+]
+
+OPTIONAL_LEGACY_CLOUD_STAGE_FILES = [
+    "cloud_merge_001_head_aligned_only.txt",
+    "cloud_merge_001_sim3_aligned_only.txt",
+    "cloud_merge_001_after_two_anchor_correction.txt",
+    "cloud_merge_001_after_sim3_only_correction.txt",
+    "cloud_merge_001_after_selected_correction.txt",
+]
+
+OPTIONAL_LEGACY_SUMMARY_FILES = [
     "keyframe_source_debug.csv",
     "keyframe_source_summary.txt",
-    "okvis_wrapper.txt",
-    "okvis_full_traj.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
 ]
 
-TUM_TRAJECTORY_FILES = [
-    "whole_map.txt",
-    "whole_map_sorted_unique.txt",
-    "whole_map_no_cloud.txt",
-    "whole_map_cloud_only.txt",
-    "map_1_all.txt",
-    "map_1_edge_only.txt",
-    "map_1_cloud_only.txt",
-    "map_2_all.txt",
-    "map_2_edge_only.txt",
-    "map_2_cloud_only.txt",
-    "okvis_wrapper.txt",
-    "okvis_full_traj.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
-]
-
-INDEPENDENT_SE3_EVAL_FILES = [
-    "okvis_wrapper.txt",
-    "whole_map_no_cloud.txt",
-    "whole_map_cloud_only.txt",
-    "whole_map_sorted_unique.txt",
-    "whole_map.txt",
-    "map_1_edge_only.txt",
-    "map_1_cloud_only.txt",
-    "map_1_all.txt",
-    "map_2_edge_only.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
-]
-
+EXPECTED_INPUT_FILES = list(CORE_INPUT_FILES)
+TUM_TRAJECTORY_FILES = list(CORE_INPUT_FILES)
+INDEPENDENT_SE3_EVAL_FILES = list(CORE_INPUT_FILES)
 NO_CLOUD_ALIGNMENT_EVAL_FILES = [
-    "whole_map_cloud_only.txt",
-    "whole_map_sorted_unique.txt",
     "whole_map.txt",
-    "map_1_cloud_only.txt",
-    "map_1_all.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
+    "whole_map_cloud_only.txt",
 ]
-
 PAIR_OVERLAP_FILES = [
-    ("whole_map_no_cloud.txt", "map_1_edge_only.txt"),
-    ("whole_map_cloud_only.txt", "map_1_cloud_only.txt"),
-    ("whole_map_sorted_unique.txt", "whole_map.txt"),
-    ("whole_map_no_cloud.txt", "whole_map_sorted_unique.txt"),
+    ("whole_map_no_cloud.txt", "whole_map.txt"),
+    ("whole_map_cloud_only.txt", "whole_map.txt"),
 ]
-
-AXIS_ERROR_FILES = [
-    "okvis_full_traj.txt",
-    "okvis_wrapper.txt",
-    "whole_map.txt",
-    "whole_map_sorted_unique.txt",
-    "whole_map_no_cloud.txt",
-    "whole_map_cloud_only.txt",
-    "map_1_edge_only.txt",
-    "map_1_cloud_only.txt",
-    "map_1_all.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
-]
-
+AXIS_ERROR_FILES = list(CORE_INPUT_FILES)
 EDGE_FIXED_SE3_FILES = [
     "whole_map.txt",
-    "whole_map_sorted_unique.txt",
     "whole_map_cloud_only.txt",
-    "map_1_cloud_only.txt",
-    "map_1_all.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
 ]
-
 SEGMENT_Z_ERROR_FILES = [
     "whole_map.txt",
-    "map_1_all.txt",
 ]
-
-TIME_BALANCED_FILES = [
-    "whole_map.txt",
-    "map_1_edge_only.txt",
-    "map_1_cloud_only.txt",
-    "map_1_all.txt",
-    "okvis_full_traj.txt",
-    "okvis_wrapper.txt",
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
-]
-
-CLOUD_CORRECTION_STAGE_FILES = [
-    "cloud_merge_001_head_aligned_only.txt",
-    "cloud_merge_001_sim3_aligned_only.txt",
-    "cloud_merge_001_after_two_anchor_correction.txt",
-    "cloud_merge_001_after_sim3_only_correction.txt",
-    "cloud_merge_001_after_selected_correction.txt",
-]
+TIME_BALANCED_FILES = list(CORE_INPUT_FILES)
+CLOUD_CORRECTION_STAGE_FILES: List[str] = []
 
 
 @dataclass
@@ -199,6 +117,110 @@ class RigidTransform:
         composed_rotation = self.rotation @ other.rotation
         composed_translation = self.rotation @ other.translation + self.translation
         return RigidTransform(rotation=composed_rotation, translation=composed_translation)
+
+
+def append_unique(items: List[str], item: str) -> None:
+    if item not in items:
+        items.append(item)
+
+
+def existing_named_files(result_dir: str, file_names: Sequence[str]) -> List[str]:
+    existing: List[str] = []
+    for file_name in file_names:
+        file_path = os.path.join(result_dir, file_name)
+        if os.path.exists(file_path):
+            append_unique(existing, file_name)
+    return existing
+
+
+def glob_existing_basenames(result_dir: str, pattern: str) -> List[str]:
+    matched_paths = glob.glob(os.path.join(result_dir, pattern))
+    basenames = [os.path.basename(path) for path in matched_paths]
+    return sorted(basenames)
+
+
+def build_default_input_lists(result_dir: str) -> Dict[str, List[object]]:
+    map_cloud_files = glob_existing_basenames(result_dir, "map_*_cloud_only.txt")
+    selected_summary_files = glob_existing_basenames(result_dir, "cloud_merge_*_selected_correction_summary.txt")
+    sim3_summary_files = glob_existing_basenames(result_dir, "cloud_merge_*_sim3_alignment_debug_summary.txt")
+    legacy_tum_files = existing_named_files(
+        result_dir,
+        list(OPTIONAL_LEGACY_TUM_FILES) + list(OPTIONAL_LEGACY_CLOUD_STAGE_FILES),
+    )
+    legacy_summary_files = existing_named_files(result_dir, OPTIONAL_LEGACY_SUMMARY_FILES)
+
+    expected_files: List[str] = []
+    for file_name in CORE_INPUT_FILES:
+        append_unique(expected_files, file_name)
+    for file_name in map_cloud_files:
+        append_unique(expected_files, file_name)
+    for file_name in selected_summary_files:
+        append_unique(expected_files, file_name)
+    for file_name in sim3_summary_files:
+        append_unique(expected_files, file_name)
+    for file_name in legacy_tum_files:
+        append_unique(expected_files, file_name)
+    for file_name in legacy_summary_files:
+        append_unique(expected_files, file_name)
+
+    tum_files: List[str] = []
+    for file_name in CORE_INPUT_FILES:
+        append_unique(tum_files, file_name)
+    for file_name in map_cloud_files:
+        append_unique(tum_files, file_name)
+    for file_name in legacy_tum_files:
+        append_unique(tum_files, file_name)
+
+    independent_files = list(tum_files)
+    no_cloud_alignment_files: List[str] = []
+    for file_name in ["whole_map.txt", "whole_map_cloud_only.txt"]:
+        append_unique(no_cloud_alignment_files, file_name)
+    for file_name in map_cloud_files:
+        append_unique(no_cloud_alignment_files, file_name)
+    for file_name in legacy_tum_files:
+        if file_name != "whole_map_no_cloud.txt":
+            append_unique(no_cloud_alignment_files, file_name)
+
+    pair_files: List[object] = [
+        ("whole_map_no_cloud.txt", "whole_map.txt"),
+        ("whole_map_cloud_only.txt", "whole_map.txt"),
+    ]
+    if "whole_map_sorted_unique.txt" in legacy_tum_files:
+        pair_files.append(("whole_map_sorted_unique.txt", "whole_map.txt"))
+        pair_files.append(("whole_map_no_cloud.txt", "whole_map_sorted_unique.txt"))
+    if "map_1_edge_only.txt" in legacy_tum_files:
+        pair_files.append(("whole_map_no_cloud.txt", "map_1_edge_only.txt"))
+    if "map_1_cloud_only.txt" in legacy_tum_files:
+        pair_files.append(("whole_map_cloud_only.txt", "map_1_cloud_only.txt"))
+
+    axis_files = list(tum_files)
+    edge_fixed_files: List[str] = []
+    for file_name in ["whole_map.txt", "whole_map_cloud_only.txt"]:
+        append_unique(edge_fixed_files, file_name)
+    for file_name in map_cloud_files:
+        append_unique(edge_fixed_files, file_name)
+    for file_name in legacy_tum_files:
+        if file_name != "whole_map_no_cloud.txt":
+            append_unique(edge_fixed_files, file_name)
+
+    segment_files: List[str] = ["whole_map.txt"]
+    if "map_1_all.txt" in legacy_tum_files:
+        append_unique(segment_files, "map_1_all.txt")
+
+    return {
+        "expected": expected_files,
+        "tum": tum_files,
+        "independent": independent_files,
+        "no_cloud_alignment": no_cloud_alignment_files,
+        "pairs": pair_files,
+        "axis": axis_files,
+        "edge_fixed": edge_fixed_files,
+        "segment": segment_files,
+        "time_balanced": list(tum_files),
+        "cloud_stages": existing_named_files(result_dir, OPTIONAL_LEGACY_CLOUD_STAGE_FILES),
+        "selected_summaries": selected_summary_files,
+        "sim3_summaries": sim3_summary_files,
+    }
 
 
 def format_float(value: Optional[float]) -> str:
@@ -535,7 +557,7 @@ def build_edge_fixed_alignment_transform(
     gt_traj: Optional[Trajectory],
     max_diff: float,
 ) -> Tuple[Optional[RigidTransform], str, int, str]:
-    for reference_file in ["map_1_edge_only.txt", "whole_map_no_cloud.txt"]:
+    for reference_file in ["whole_map_no_cloud.txt"]:
         reference_traj = trajectories.get(reference_file)
         if reference_traj is None:
             continue
@@ -627,7 +649,7 @@ def compute_axis_metrics_from_errors(
 
 
 def get_cloud_interval(trajectories: Dict[str, Trajectory]) -> Tuple[Optional[float], Optional[float]]:
-    cloud_traj = trajectories.get("map_1_cloud_only.txt")
+    cloud_traj = trajectories.get("whole_map_cloud_only.txt")
     if cloud_traj is None:
         return None, None
     if cloud_traj.timestamps.size == 0:
@@ -800,9 +822,9 @@ def compare_alignment_transforms(
     result["rotation_delta_yaw_deg"] = yaw_deg
 
     if abs(float(result["translation_delta_z"])) > SIGNIFICANT_Z_ERROR_M:
-        result["warning"] = "WARNING: whole_map independent alignment differs from edge-only alignment and may change visual Z behavior."
+        result["warning"] = "WARNING: whole_map independent alignment differs from no-cloud alignment and may change visual Z behavior."
     if abs(roll_deg) > SIGNIFICANT_ANGLE_DEG or abs(pitch_deg) > SIGNIFICANT_ANGLE_DEG:
-        result["warning"] = "WARNING: whole_map independent alignment differs from edge-only alignment and may change visual Z behavior."
+        result["warning"] = "WARNING: whole_map independent alignment differs from no-cloud alignment and may change visual Z behavior."
 
     return result
 
@@ -937,8 +959,8 @@ def nearest_index_by_time(times: np.ndarray, target_time: float) -> Optional[int
 def compute_anchor_continuity(
     trajectories: Dict[str, Trajectory],
 ) -> Dict[str, object]:
-    cloud_file = "map_1_cloud_only.txt"
-    edge_file = "map_1_edge_only.txt"
+    cloud_file = "whole_map_cloud_only.txt"
+    edge_file = "whole_map_no_cloud.txt"
     cloud_traj = trajectories.get(cloud_file)
     edge_traj = trajectories.get(edge_file)
 
@@ -1483,7 +1505,7 @@ def write_axis_error_summary_txt(
 
         output_file.write("[Diagnosis Hints]\n")
         whole_independent = find_axis_metric(axis_metrics, "whole_map.txt", "independent_se3", "all")
-        edge_independent = find_axis_metric(axis_metrics, "map_1_edge_only.txt", "independent_se3", "all")
+        edge_independent = find_axis_metric(axis_metrics, "whole_map_no_cloud.txt", "independent_se3", "all")
 
         whole_rmse_z = get_metric_float(whole_independent, "rmse_z")
         edge_rmse_z = get_metric_float(edge_independent, "rmse_z")
@@ -1493,14 +1515,14 @@ def write_axis_error_summary_txt(
         if whole_rmse_z is not None and edge_rmse_z is not None:
             threshold = edge_rmse_z + max(SIGNIFICANT_Z_ERROR_M, edge_rmse_z * 0.2)
             if whole_rmse_z > threshold:
-                output_file.write("whole_map has larger Z-axis error than edge-only trajectory.\n")
+                output_file.write("whole_map has larger Z-axis error than no-cloud trajectory.\n")
 
         if whole_rmse_xyz is not None and whole_rmse_z is not None and edge_rmse_xyz is not None:
             if whole_rmse_xyz <= edge_rmse_xyz * 1.1 and whole_rmse_z > max(SIGNIFICANT_Z_ERROR_M, whole_rmse_xyz * 0.5):
                 output_file.write("Overall ATE RMSE hides Z-axis degradation.\n")
 
         if transform_compare.get("warning", "") != "":
-            output_file.write("Independent SE3 alignment of whole_map changes the vertical alignment compared with edge-only alignment.\n")
+            output_file.write("Independent SE3 alignment of whole_map changes the vertical alignment compared with no-cloud alignment.\n")
 
         inside_metric = find_axis_metric(axis_metrics, "whole_map.txt", "edge_fixed_se3", "inside_cloud")
         before_metric = find_axis_metric(axis_metrics, "whole_map.txt", "edge_fixed_se3", "before_cloud")
@@ -1789,24 +1811,24 @@ def write_summary(
                 output_file.write("\n")
 
         output_file.write("[Diagnosis Hints]\n")
-        if is_pair_identical(pair_results, "whole_map_no_cloud.txt vs map_1_edge_only.txt"):
-            output_file.write("whole_map_no_cloud is equivalent to map_1_edge_only on associated timestamps.\n")
+        if is_pair_identical(pair_results, "whole_map_no_cloud.txt vs whole_map.txt"):
+            output_file.write("whole_map_no_cloud is equivalent to whole_map on associated timestamps.\n")
 
-        if is_pair_identical(pair_results, "whole_map_cloud_only.txt vs map_1_cloud_only.txt"):
-            output_file.write("whole_map_cloud_only is equivalent to map_1_cloud_only on associated timestamps.\n")
+        if is_pair_identical(pair_results, "whole_map_cloud_only.txt vs whole_map.txt"):
+            output_file.write("whole_map_cloud_only is equivalent to whole_map on associated timestamps.\n")
 
-        map1_edge_ate = independent_ate_by_file.get("map_1_edge_only.txt")
-        map1_edge_metrics = basic_metrics_by_file.get("map_1_edge_only.txt")
-        if map1_edge_ate is not None:
-            if trajectory_is_likely_normal(map1_edge_ate, map1_edge_metrics):
-                output_file.write("Map 1 edge trajectory is likely normal.\n")
+        no_cloud_ate = independent_ate_by_file.get("whole_map_no_cloud.txt")
+        no_cloud_metrics = basic_metrics_by_file.get("whole_map_no_cloud.txt")
+        if no_cloud_ate is not None:
+            if trajectory_is_likely_normal(no_cloud_ate, no_cloud_metrics):
+                output_file.write("whole_map_no_cloud trajectory is likely normal.\n")
 
-        map1_cloud_independent = independent_ate_by_file.get("map_1_cloud_only.txt")
-        map1_cloud_fixed = no_cloud_ate_by_file.get("map_1_cloud_only.txt")
-        if map1_cloud_independent is not None and map1_cloud_fixed is not None:
-            if ate_warning_hidden_global_error(map1_cloud_independent, map1_cloud_fixed):
+        cloud_independent = independent_ate_by_file.get("whole_map_cloud_only.txt")
+        cloud_fixed = no_cloud_ate_by_file.get("whole_map_cloud_only.txt")
+        if cloud_independent is not None and cloud_fixed is not None:
+            if ate_warning_hidden_global_error(cloud_independent, cloud_fixed):
                 output_file.write("WARNING: independent alignment hides global attachment error.\n")
-                output_file.write("Cloud trajectory is inconsistent with the edge-defined global frame.\n")
+                output_file.write("Cloud trajectory is inconsistent with the no-cloud-defined global frame.\n")
 
         for file_name in NO_CLOUD_ALIGNMENT_EVAL_FILES:
             independent = independent_ate_by_file.get(file_name)
@@ -1825,6 +1847,17 @@ def write_summary(
 
 
 def main() -> int:
+    global EXPECTED_INPUT_FILES
+    global TUM_TRAJECTORY_FILES
+    global INDEPENDENT_SE3_EVAL_FILES
+    global NO_CLOUD_ALIGNMENT_EVAL_FILES
+    global PAIR_OVERLAP_FILES
+    global AXIS_ERROR_FILES
+    global EDGE_FIXED_SE3_FILES
+    global SEGMENT_Z_ERROR_FILES
+    global TIME_BALANCED_FILES
+    global CLOUD_CORRECTION_STAGE_FILES
+
     args = parse_args()
     cwd = os.getcwd()
     result_dir_arg = args.result_dir
@@ -1839,6 +1872,22 @@ def main() -> int:
         raise SystemExit("ERROR: invalid result directory.")
     if not os.path.isdir(result_dir):
         raise SystemExit("ERROR: result_dir does not exist or is not a directory: {}".format(result_dir))
+
+    input_lists = build_default_input_lists(result_dir)
+    EXPECTED_INPUT_FILES = [str(item) for item in input_lists["expected"]]
+    TUM_TRAJECTORY_FILES = [str(item) for item in input_lists["tum"]]
+    INDEPENDENT_SE3_EVAL_FILES = [str(item) for item in input_lists["independent"]]
+    NO_CLOUD_ALIGNMENT_EVAL_FILES = [str(item) for item in input_lists["no_cloud_alignment"]]
+    PAIR_OVERLAP_FILES = [
+        (str(pair[0]), str(pair[1]))
+        for pair in input_lists["pairs"]
+        if isinstance(pair, tuple)
+    ]
+    AXIS_ERROR_FILES = [str(item) for item in input_lists["axis"]]
+    EDGE_FIXED_SE3_FILES = [str(item) for item in input_lists["edge_fixed"]]
+    SEGMENT_Z_ERROR_FILES = [str(item) for item in input_lists["segment"]]
+    TIME_BALANCED_FILES = [str(item) for item in input_lists["time_balanced"]]
+    CLOUD_CORRECTION_STAGE_FILES = [str(item) for item in input_lists["cloud_stages"]]
 
     gt_file = resolve_path(args.gt_file, cwd)
     if gt_file is not None and not os.path.exists(gt_file):
@@ -1897,7 +1946,7 @@ def main() -> int:
     independent_transforms: Dict[str, Optional[RigidTransform]] = {}
     independent_transform_status: Dict[str, str] = {}
     independent_transform_counts: Dict[str, int] = {}
-    axis_transform_files = sorted(set(AXIS_ERROR_FILES + TIME_BALANCED_FILES + ["map_1_edge_only.txt", "whole_map.txt"]))
+    axis_transform_files = sorted(set(AXIS_ERROR_FILES + TIME_BALANCED_FILES + ["whole_map_no_cloud.txt", "whole_map.txt"]))
     for file_name in axis_transform_files:
         trajectory = trajectories.get(file_name)
         if trajectory is None:
@@ -1965,12 +2014,12 @@ def main() -> int:
         axis_metrics.extend(compute_segment_axis_metrics(file_name, "independent_se3", residual_rows))
         axis_metrics.extend(compute_segment_axis_metrics(file_name, "edge_fixed_se3", residual_rows))
 
-    edge_transform = independent_transforms.get("map_1_edge_only.txt")
+    edge_transform = independent_transforms.get("whole_map_no_cloud.txt")
     whole_transform = independent_transforms.get("whole_map.txt")
     transform_compare = compare_alignment_transforms(
         edge_transform,
         whole_transform,
-        independent_transform_status.get("map_1_edge_only.txt", "missing"),
+        independent_transform_status.get("whole_map_no_cloud.txt", "missing"),
         independent_transform_status.get("whole_map.txt", "missing"),
     )
 

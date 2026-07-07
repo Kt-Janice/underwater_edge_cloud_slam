@@ -140,25 +140,6 @@ static constexpr int kTrajectoryFilterAll = 0;
 static constexpr int kTrajectoryFilterCloudOnly = 1;
 static constexpr int kTrajectoryFilterEdgeOnly = 2;
 
-// [轨迹导出修改] 记录本轮新增分裂轨迹文件的输出统计。
-struct TrajectoryExportStat {
-    std::string fileName;
-    size_t records;
-};
-
-// [轨迹导出修改] 汇总每个 Map 中 KeyFrame 来源标记的统计信息。
-struct KeyFrameSourceMapSummary {
-    unsigned long mapId;
-    size_t totalKeyFrames;
-    size_t validKeyFrames;
-    size_t badKeyFrames;
-    size_t cloudKeyFrames;
-    size_t nonCloudKeyFrames;
-    bool hasValidTimestamp;
-    double minTimestamp;
-    double maxTimestamp;
-};
-
 // [轨迹导出修改] 从指定 Map 中收集所有有效 KeyFrame 的 Twc 轨迹记录。
 static void CollectTrajectoryRecordsFromMap(
     ORB_SLAM3::Map *pMap,
@@ -218,10 +199,8 @@ static void CollectTrajectoryRecordsFromAtlas(
     }
 }
 
-// [轨迹导出修改] 按时间排序并去除重复 timestamp；重复时优先保留非 cloud 记录。
-static size_t SortAndDeduplicateTrajectoryRecords(std::vector<TrajectoryRecord> &records) {
-    const size_t originalRecordCount = records.size();
-
+// [轨迹导出修改] 按 timestamp 升序排序；同 timestamp 使用 KeyFrame id 保证稳定顺序。
+static void SortTrajectoryRecords(std::vector<TrajectoryRecord> &records) {
     std::sort(records.begin(), records.end(), [](const TrajectoryRecord &left, const TrajectoryRecord &right) {
         if (left.timestamp == right.timestamp) {
             return left.keyFrameId < right.keyFrameId;
@@ -229,30 +208,32 @@ static size_t SortAndDeduplicateTrajectoryRecords(std::vector<TrajectoryRecord> 
 
         return left.timestamp < right.timestamp;
     });
+}
 
-    std::vector<TrajectoryRecord> uniqueRecords;
-    uniqueRecords.reserve(records.size());
-
+// [轨迹导出修改] 统计指定过滤模式下会写出的记录数，避免无 cloud KeyFrame 的 Map 生成空文件。
+static size_t CountTrajectoryRecords(
+    const std::vector<TrajectoryRecord> &records,
+    const int filterMode) {
+    size_t recordCount = 0;
     for (size_t i = 0; i < records.size(); i++) {
         const TrajectoryRecord &record = records[i];
-        if (uniqueRecords.empty()) {
-            uniqueRecords.push_back(record);
-            continue;
-        }
 
-        TrajectoryRecord &lastRecord = uniqueRecords.back();
-        if (std::abs(record.timestamp - lastRecord.timestamp) < 1e-9) {
-            if (lastRecord.isCloud && !record.isCloud) {
-                lastRecord = record;
+        if (filterMode == kTrajectoryFilterCloudOnly) {
+            if (!record.isCloud) {
+                continue;
             }
-            continue;
         }
 
-        uniqueRecords.push_back(record);
+        if (filterMode == kTrajectoryFilterEdgeOnly) {
+            if (record.isCloud) {
+                continue;
+            }
+        }
+
+        recordCount++;
     }
 
-    records.swap(uniqueRecords);
-    return originalRecordCount - records.size();
+    return recordCount;
 }
 
 // [轨迹导出修改] 保存 TUM 格式轨迹，支持 all / cloud-only / edge-only 三种过滤模式。
@@ -267,10 +248,12 @@ static size_t SaveTrajectoryRecordsTUM(
         return 0;
     }
 
-    size_t savedRecordCount = 0;
-    for (size_t i = 0; i < records.size(); i++) {
-        const TrajectoryRecord &record = records[i];
+    std::vector<TrajectoryRecord> sortedRecords = records;
+    SortTrajectoryRecords(sortedRecords);
 
+    size_t savedRecordCount = 0;
+    for (size_t i = 0; i < sortedRecords.size(); i++) {
+        const TrajectoryRecord &record = sortedRecords[i];
         if (filterMode == kTrajectoryFilterCloudOnly) {
             if (!record.isCloud) {
                 continue;
@@ -297,213 +280,6 @@ static size_t SaveTrajectoryRecordsTUM(
 
     ofs.close();
     return savedRecordCount;
-}
-
-// [轨迹导出修改] 导出逐 KeyFrame 来源明细和汇总，避免只依赖混杂 ROS 日志的终端输出。
-static void SaveKeyFrameSourceDebugFiles(
-    ORB_SLAM3::Atlas *pAtlas,
-    const std::string &outputDir,
-    const std::vector<TrajectoryExportStat> &trajectoryExportStats) {
-    std::string keyframe_source_debug_path = outputDir + "/keyframe_source_debug.csv";
-    std::string keyframe_source_summary_path = outputDir + "/keyframe_source_summary.txt";
-
-    std::ofstream csv_ofs(keyframe_source_debug_path);
-    if (!csv_ofs.is_open()) {
-        std::cout << "\033[1;31m[KeyFrame Source Debug] Failed to open CSV: "
-                  << keyframe_source_debug_path << "\033[0m" << std::endl;
-        return;
-    }
-
-    csv_ofs << std::boolalpha;
-    csv_ofs << "timestamp,keyframe_id,frame_id,map_id,is_cloud,is_bad,x,y,z,qx,qy,qz,qw"
-            << std::endl;
-
-    std::vector<KeyFrameSourceMapSummary> mapSummaries;
-    size_t atlas_total_keyframes = 0;
-    size_t atlas_valid_keyframes = 0;
-    size_t atlas_bad_keyframes = 0;
-    size_t atlas_cloud_keyframes = 0;
-    size_t atlas_non_cloud_keyframes = 0;
-
-    if (pAtlas != nullptr) {
-        std::vector<ORB_SLAM3::Map*> vpMaps = pAtlas->GetAllMaps();
-        for (size_t mapIndex = 0; mapIndex < vpMaps.size(); mapIndex++) {
-            ORB_SLAM3::Map *pMap = vpMaps[mapIndex];
-            if (pMap == nullptr) {
-                continue;
-            }
-
-            KeyFrameSourceMapSummary mapSummary;
-            mapSummary.mapId = pMap->GetId();
-            mapSummary.totalKeyFrames = 0;
-            mapSummary.validKeyFrames = 0;
-            mapSummary.badKeyFrames = 0;
-            mapSummary.cloudKeyFrames = 0;
-            mapSummary.nonCloudKeyFrames = 0;
-            mapSummary.hasValidTimestamp = false;
-            mapSummary.minTimestamp = 0.0;
-            mapSummary.maxTimestamp = 0.0;
-
-            std::vector<ORB_SLAM3::KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
-            for (size_t keyFrameIndex = 0; keyFrameIndex < vpKFs.size(); keyFrameIndex++) {
-                ORB_SLAM3::KeyFrame *pKF = vpKFs[keyFrameIndex];
-                if (pKF == nullptr) {
-                    continue;
-                }
-
-                const bool isBad = pKF->isBad();
-                const bool isCloud = pKF->isCloud();
-                Sophus::SE3f Twc = pKF->GetPoseInverse();
-                Eigen::Vector3f translation = Twc.translation();
-                Eigen::Quaternionf quaternion = Twc.unit_quaternion();
-                quaternion.normalize();
-
-                csv_ofs << std::fixed << std::setprecision(9)
-                        << pKF->mTimeStamp << ","
-                        << pKF->mnId << ","
-                        << pKF->mnFrameId << ","
-                        << pMap->GetId() << ","
-                        << isCloud << ","
-                        << isBad << ","
-                        << translation.x() << ","
-                        << translation.y() << ","
-                        << translation.z() << ","
-                        << quaternion.x() << ","
-                        << quaternion.y() << ","
-                        << quaternion.z() << ","
-                        << quaternion.w() << std::endl;
-
-                mapSummary.totalKeyFrames++;
-                atlas_total_keyframes++;
-
-                if (isBad) {
-                    mapSummary.badKeyFrames++;
-                    atlas_bad_keyframes++;
-                    continue;
-                }
-
-                mapSummary.validKeyFrames++;
-                atlas_valid_keyframes++;
-
-                if (isCloud) {
-                    mapSummary.cloudKeyFrames++;
-                    atlas_cloud_keyframes++;
-                } else {
-                    mapSummary.nonCloudKeyFrames++;
-                    atlas_non_cloud_keyframes++;
-                }
-
-                if (!mapSummary.hasValidTimestamp) {
-                    mapSummary.minTimestamp = pKF->mTimeStamp;
-                    mapSummary.maxTimestamp = pKF->mTimeStamp;
-                    mapSummary.hasValidTimestamp = true;
-                } else {
-                    if (pKF->mTimeStamp < mapSummary.minTimestamp) {
-                        mapSummary.minTimestamp = pKF->mTimeStamp;
-                    }
-
-                    if (pKF->mTimeStamp > mapSummary.maxTimestamp) {
-                        mapSummary.maxTimestamp = pKF->mTimeStamp;
-                    }
-                }
-            }
-
-            mapSummaries.push_back(mapSummary);
-        }
-    }
-
-    csv_ofs.close();
-
-    std::ofstream summary_ofs(keyframe_source_summary_path);
-    if (!summary_ofs.is_open()) {
-        std::cout << "\033[1;31m[KeyFrame Source Debug] Failed to open summary: "
-                  << keyframe_source_summary_path << "\033[0m" << std::endl;
-        return;
-    }
-
-    summary_ofs << std::boolalpha;
-    summary_ofs << "[KeyFrame Source Debug Summary]" << std::endl;
-    summary_ofs << "output_dir = " << outputDir << std::endl;
-    summary_ofs << "csv_file = keyframe_source_debug.csv" << std::endl;
-    summary_ofs << std::endl;
-
-    summary_ofs << "[Per Map Summary]" << std::endl;
-    summary_ofs << "map_id,total_keyframes,valid_keyframes,bad_keyframes,cloud_keyframes,non_cloud_keyframes,t_min,t_max"
-                << std::endl;
-    for (size_t i = 0; i < mapSummaries.size(); i++) {
-        const KeyFrameSourceMapSummary &mapSummary = mapSummaries[i];
-        summary_ofs << mapSummary.mapId << ","
-                    << mapSummary.totalKeyFrames << ","
-                    << mapSummary.validKeyFrames << ","
-                    << mapSummary.badKeyFrames << ","
-                    << mapSummary.cloudKeyFrames << ","
-                    << mapSummary.nonCloudKeyFrames << ",";
-
-        if (mapSummary.hasValidTimestamp) {
-            summary_ofs << std::fixed << std::setprecision(9)
-                        << mapSummary.minTimestamp << ","
-                        << mapSummary.maxTimestamp;
-        } else {
-            summary_ofs << "nan,nan";
-        }
-
-        summary_ofs << std::endl;
-    }
-    summary_ofs << std::endl;
-
-    bool cloud_mark_present = false;
-    if (atlas_cloud_keyframes > 0) {
-        cloud_mark_present = true;
-    }
-
-    summary_ofs << "[Atlas Summary]" << std::endl;
-    summary_ofs << "atlas_total_keyframes = " << atlas_total_keyframes << std::endl;
-    summary_ofs << "atlas_valid_keyframes = " << atlas_valid_keyframes << std::endl;
-    summary_ofs << "atlas_bad_keyframes = " << atlas_bad_keyframes << std::endl;
-    summary_ofs << "atlas_cloud_keyframes = " << atlas_cloud_keyframes << std::endl;
-    summary_ofs << "atlas_non_cloud_keyframes = " << atlas_non_cloud_keyframes << std::endl;
-    summary_ofs << "cloud_mark_present = " << cloud_mark_present << std::endl;
-    summary_ofs << std::endl;
-
-    summary_ofs << "[Interpretation Hint]" << std::endl;
-    if (atlas_cloud_keyframes == 0) {
-        summary_ofs << "[WARNING]" << std::endl;
-        summary_ofs << "No cloud KeyFrames are marked in the final Atlas." << std::endl;
-        summary_ofs << "whole_map_no_cloud.txt will be identical or very close to whole_map_sorted_unique.txt." << std::endl;
-        summary_ofs << "The current isCloud() flag is not sufficient for separating CloudMap and EdgeMap trajectories." << std::endl;
-    } else {
-        summary_ofs << "[OK]" << std::endl;
-        summary_ofs << "Cloud KeyFrame marks are present in the final Atlas." << std::endl;
-        summary_ofs << "whole_map_no_cloud.txt should exclude these cloud KeyFrames if skipCloud filtering is implemented correctly." << std::endl;
-    }
-    summary_ofs << std::endl;
-    summary_ofs << std::endl;
-
-    summary_ofs << "[Trajectory Split Export Summary]" << std::endl;
-    summary_ofs << "file,records" << std::endl;
-    for (size_t i = 0; i < trajectoryExportStats.size(); i++) {
-        summary_ofs << trajectoryExportStats[i].fileName << ","
-                    << trajectoryExportStats[i].records << std::endl;
-    }
-
-    summary_ofs.close();
-
-    std::cout << "[KeyFrame Source Debug] Saved CSV: "
-              << keyframe_source_debug_path << std::endl;
-    std::cout << "[KeyFrame Source Debug] Saved summary: "
-              << keyframe_source_summary_path << std::endl;
-    std::cout << "[KeyFrame Source Debug] atlas valid KFs = "
-              << atlas_valid_keyframes
-              << ", cloud KFs = "
-              << atlas_cloud_keyframes
-              << ", non-cloud KFs = "
-              << atlas_non_cloud_keyframes
-              << std::endl;
-
-    if (atlas_cloud_keyframes == 0) {
-        std::cout << "[KeyFrame Source Debug][WARNING] No cloud KeyFrames are marked in final Atlas."
-                  << std::endl;
-    }
 }
 
 class Grabber {
@@ -770,7 +546,7 @@ int main(int argc, char **argv) {
     ORB_SLAM3::System SLAM(vocabularyPath, settingPath, ORB_SLAM3::System::MONOCULAR, true, bCloudMerge, bCloudOnline, bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum, nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd, samplerPDth, bOldUdf, bNewUdf);//
     //调用system.cc，初始化orbslam3，输入一些参数，如字典路径、yaml路径，相机类型，可视化查看器，launch中的参数
 
-    // [CloudMap校正诊断] 将当前结果目录传给 CloudMerging，用于输出 CloudMap 校正前后三阶段轨迹。
+    // [CloudMap校正诊断] 将当前结果目录传给 CloudMerging，用于输出 CloudMap 校正统计 summary。
     ORB_SLAM3::CloudMerging *pCloudMerger = SLAM.GetCloudMerger();
     if (pCloudMerger != nullptr) {
         pCloudMerger->SetCloudMergeDebugOutputDir(full_path);
@@ -781,9 +557,6 @@ int main(int argc, char **argv) {
 
     std::string okvis_full_traj_path = full_path + "/okvis_full_traj.txt";
     pSVIn2ORBWrapper->InitOkvisFullTrajectorySaver(okvis_full_traj_path);
-
-    std::string injection_candidate_traj_path = full_path + "/okvis_wrapper.txt";
-    pSVIn2ORBWrapper->InitTrajectorySaver(injection_candidate_traj_path);
 
     Grabber igb(&SLAM);
 
@@ -862,73 +635,29 @@ int main(int argc, char **argv) {
     fout_map_point << duration << endl;
     fout_map_point.close();
 
-    // ORB_SLAM3::CloudSaveKeyFrameTrajectoryTUM(SLAM.GetAtlas()->GetDurationLongestMap(), (full_path_ / "whole_map.txt").string());
-    // std::vector<double> vTimestammp;
-    // std::vector<Eigen::Vector3f> vPosition;
-    // std::vector<Eigen::Quaternionf> vQuaternion;
-    // ORB_SLAM3::Map *pLongestMap = SLAM.GetAtlas()->GetDurationLongestMap();
-    // std::vector<ORB_SLAM3::KeyFrame *> vpKFs = pLongestMap->GetSortedKeyFrames();
-    // ORB_SLAM3::CloudExportKeyFrameTrajectoryTUM(pLongestMap, vTimestammp, vPosition, vQuaternion);
-
-    // [落实路径 A 扩展]：遍历 Atlas 库，支持通过 Bool 变量控制是否物理拼接轨迹
+    // [轨迹导出修改] 直接从 Atlas / Map / KeyFrame 内存对象导出最终保留轨迹，不再生成中间 traj_map 文件。
     std::vector<ORB_SLAM3::Map*> vpMaps = SLAM.GetAtlas()->GetAllMaps();
     int valid_map_count = 0;
-    
-    // 1. 定义控制拼接的 Bool 变量（可支持从 ROS 参数服务器读取）
-    bool bStitchTrajectories = true; 
-    nh.param<bool>("stitch_trajectories", bStitchTrajectories, true);
-
-    // 2. 如果需要拼接，提前初始化总输出文件流
-    std::string whole_stitch_path = (full_path_ / "whole_map.txt").string();
-    std::ofstream fout_whole;
-    if (bStitchTrajectories) {
-        fout_whole.open(whole_stitch_path);
-    }
-
-    // 3. 遍历所有子图
-    for (size_t i = 0; i < vpMaps.size(); ++i) {
+    for (size_t i = 0; i < vpMaps.size(); i++) {
         ORB_SLAM3::Map* pMap = vpMaps[i];
-        
+        if (pMap == nullptr) {
+            continue;
+        }
+
         if (pMap->KeyFramesInMap() > 5) {
-            std::string map_file_name = "traj_map_" + std::to_string(pMap->GetId()) + ".txt";
-            std::string map_traj_file = (full_path_ / map_file_name).string();
-            
-            // 原生保存：依然保留各个独立的子图碎片，确保底层数据不丢失
-            ORB_SLAM3::CloudSaveKeyFrameTrajectoryTUM(pMap, map_traj_file);
-            
-            std::vector<double> vTimestammp;
-            std::vector<Eigen::Vector3f> vPosition;
-            std::vector<Eigen::Quaternionf> vQuaternion;
-            ORB_SLAM3::CloudExportKeyFrameTrajectoryTUM(pMap, vTimestammp, vPosition, vQuaternion);
-            
             valid_map_count++;
-            std::cout << "[System] Receive Submap ID: " << pMap->GetId() << " (包含 " << pMap->KeyFramesInMap() << " FPS)" << std::endl;
-
-            // 4. 判断节点：如果开启拼接，执行物理文件流追加
-            if (bStitchTrajectories) {
-                std::ifstream fin_sub(map_traj_file);
-                if (fin_sub.is_open()) {
-                    std::string line;
-                    while (std::getline(fin_sub, line)) {
-                        fout_whole << line << "\n";
-                    }
-                    fin_sub.close();
-                }
-            }
-        } 
-    }
-
-    // 5. 收尾工作：关闭总文件流
-    if (bStitchTrajectories) {
-        fout_whole.close();
-        std::cout << "[System] Map have saved and be named: whole_map.txt" << std::endl;
+            std::cout << "[System] Receive Submap ID: "
+                      << pMap->GetId()
+                      << " (包含 "
+                      << pMap->KeyFramesInMap()
+                      << " FPS)"
+                      << std::endl;
+        }
     }
     std::cout << "[System] A total of " << valid_map_count << " valid trajectories were processed. " << std::endl;
 
-    // [轨迹导出修改] 额外从 Atlas 直接收集 KeyFrame 轨迹，避免 whole_map.txt 物理追加导致全局时间乱序。
     std::vector<TrajectoryRecord> atlasTrajectoryRecords;
     CollectTrajectoryRecordsFromAtlas(SLAM.GetAtlas(), atlasTrajectoryRecords);
-
     const size_t rawRecordCount = atlasTrajectoryRecords.size();
     size_t cloudRecordCount = 0;
     size_t nonCloudRecordCount = 0;
@@ -948,19 +677,14 @@ int main(int argc, char **argv) {
               << nonCloudRecordCount
               << std::endl;
 
-    const size_t duplicateRemovedCount = SortAndDeduplicateTrajectoryRecords(atlasTrajectoryRecords);
-    std::vector<TrajectoryExportStat> trajectoryExportStats;
-
-    std::string whole_sorted_unique_path = full_path + "/whole_map_sorted_unique.txt";
-    const size_t sortedUniqueCount = SaveTrajectoryRecordsTUM(
+    std::string whole_map_path = full_path + "/whole_map.txt";
+    const size_t wholeMapCount = SaveTrajectoryRecordsTUM(
         atlasTrajectoryRecords,
-        whole_sorted_unique_path,
+        whole_map_path,
         kTrajectoryFilterAll);
 
-    std::cout << "[Trajectory Export] Saved whole_map_sorted_unique.txt, records = "
-              << sortedUniqueCount
-              << ", duplicates removed = "
-              << duplicateRemovedCount
+    std::cout << "[Trajectory Export] Saved whole_map.txt, records = "
+              << wholeMapCount
               << std::endl;
 
     std::string whole_no_cloud_path = full_path + "/whole_map_no_cloud.txt";
@@ -983,12 +707,7 @@ int main(int argc, char **argv) {
               << cloudOnlyCount
               << std::endl;
 
-    TrajectoryExportStat cloudOnlyStat;
-    cloudOnlyStat.fileName = "whole_map_cloud_only.txt";
-    cloudOnlyStat.records = cloudOnlyCount;
-    trajectoryExportStats.push_back(cloudOnlyStat);
-
-    // [轨迹导出修改] 按 Map 拆分 all / cloud-only / edge-only 轨迹，诊断 CloudMap 自身和 Map 内 edge 部分。
+    // [轨迹导出修改] 每个有效 Map 只导出 cloud-only 轨迹；无 cloud KeyFrame 的 Map 跳过空文件生成。
     for (size_t mapIndex = 0; mapIndex < vpMaps.size(); mapIndex++) {
         ORB_SLAM3::Map *pMap = vpMaps[mapIndex];
         if (pMap == nullptr) {
@@ -997,29 +716,20 @@ int main(int argc, char **argv) {
 
         std::vector<TrajectoryRecord> mapTrajectoryRecords;
         CollectTrajectoryRecordsFromMap(pMap, mapTrajectoryRecords);
-        SortAndDeduplicateTrajectoryRecords(mapTrajectoryRecords);
-
         std::string map_id_string = std::to_string(pMap->GetId());
-
-        std::string map_all_file_name = "map_" + map_id_string + "_all.txt";
-        std::string map_all_path = full_path + "/" + map_all_file_name;
-        const size_t mapAllCount = SaveTrajectoryRecordsTUM(
-            mapTrajectoryRecords,
-            map_all_path,
-            kTrajectoryFilterAll);
-
-        std::cout << "[Trajectory Export] Saved "
-                  << map_all_file_name
-                  << ", records = "
-                  << mapAllCount
-                  << std::endl;
-
-        TrajectoryExportStat mapAllStat;
-        mapAllStat.fileName = map_all_file_name;
-        mapAllStat.records = mapAllCount;
-        trajectoryExportStats.push_back(mapAllStat);
-
         std::string map_cloud_only_file_name = "map_" + map_id_string + "_cloud_only.txt";
+        const size_t mapCloudOnlyRecordCount = CountTrajectoryRecords(
+            mapTrajectoryRecords,
+            kTrajectoryFilterCloudOnly);
+
+        if (mapCloudOnlyRecordCount == 0) {
+            std::cout << "[Trajectory Export] Skip "
+                      << map_cloud_only_file_name
+                      << " because this Map has no cloud KeyFrame."
+                      << std::endl;
+            continue;
+        }
+
         std::string map_cloud_only_path = full_path + "/" + map_cloud_only_file_name;
         const size_t mapCloudOnlyCount = SaveTrajectoryRecordsTUM(
             mapTrajectoryRecords,
@@ -1031,33 +741,7 @@ int main(int argc, char **argv) {
                   << ", records = "
                   << mapCloudOnlyCount
                   << std::endl;
-
-        TrajectoryExportStat mapCloudOnlyStat;
-        mapCloudOnlyStat.fileName = map_cloud_only_file_name;
-        mapCloudOnlyStat.records = mapCloudOnlyCount;
-        trajectoryExportStats.push_back(mapCloudOnlyStat);
-
-        std::string map_edge_only_file_name = "map_" + map_id_string + "_edge_only.txt";
-        std::string map_edge_only_path = full_path + "/" + map_edge_only_file_name;
-        const size_t mapEdgeOnlyCount = SaveTrajectoryRecordsTUM(
-            mapTrajectoryRecords,
-            map_edge_only_path,
-            kTrajectoryFilterEdgeOnly);
-
-        std::cout << "[Trajectory Export] Saved "
-                  << map_edge_only_file_name
-                  << ", records = "
-                  << mapEdgeOnlyCount
-                  << std::endl;
-
-        TrajectoryExportStat mapEdgeOnlyStat;
-        mapEdgeOnlyStat.fileName = map_edge_only_file_name;
-        mapEdgeOnlyStat.records = mapEdgeOnlyCount;
-        trajectoryExportStats.push_back(mapEdgeOnlyStat);
     }
-
-    // [轨迹导出修改] 保存 KeyFrame 来源诊断文件，与 whole_map 系列轨迹放在同一个输出目录。
-    SaveKeyFrameSourceDebugFiles(SLAM.GetAtlas(), full_path, trajectoryExportStats);
     
     // rename dir for tag
     boost::filesystem::rename(full_path_, full_finish_path_);
