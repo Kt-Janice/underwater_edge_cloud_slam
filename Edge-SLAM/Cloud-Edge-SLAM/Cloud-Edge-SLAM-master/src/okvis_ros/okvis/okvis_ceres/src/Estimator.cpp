@@ -40,9 +40,15 @@
 
 #include <glog/logging.h>
 
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <thread>
 #include <okvis/Estimator.hpp>
 #include <okvis/IdProvider.hpp>
 #include <okvis/MultiFrame.hpp>
@@ -60,6 +66,22 @@
 #include <vector>
 #include "SVIn2ORBWrapper.h" 
 extern SVIn2ORBWrapper* pSVIn2ORBWrapper;
+
+namespace {
+
+// [前端负载诊断] 仅记录 live 边缘化帧的时序，不参与 OKVIS 优化或边端注入决策。
+constexpr double kMarginalizedFrameDebugGapMs = 100.0;
+std::atomic<std::uint64_t> gMarginalizedFrameSequenceId(0);
+
+struct MarginalizedFrameDebugClock {
+  bool has_previous = false;
+  std::chrono::steady_clock::time_point previous_wall_time;
+  double previous_frontend_timestamp = 0.0;
+};
+
+MarginalizedFrameDebugClock gMarginalizedFrameDebugClock;
+
+}  // namespace
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {
@@ -737,6 +759,84 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
             // [终极防御核心]：放弃 std::vector，直接把内存指针和真实大小递给边界！
             marg_data.num_landmarks = temp_landmarks.size();
             marg_data.landmarks = temp_landmarks.data();
+
+            // [前端负载诊断] 在唯一的 live 边缘化出口生成序号和时序元数据。
+            const std::chrono::steady_clock::time_point wallNow = std::chrono::steady_clock::now();
+            const std::chrono::system_clock::time_point systemWallNow = std::chrono::system_clock::now();
+            marg_data.diagnostic_sequence_id = gMarginalizedFrameSequenceId.fetch_add(1) + 1;
+            marg_data.diagnostic_wall_timestamp =
+                std::chrono::duration_cast<std::chrono::duration<double>>(systemWallNow.time_since_epoch()).count();
+            marg_data.diagnostic_wall_gap_ms = 0.0;
+            marg_data.diagnostic_frontend_timestamp_gap_ms = 0.0;
+            marg_data.diagnostic_wall_gap_available = false;
+            marg_data.diagnostic_frontend_gap_available = false;
+            marg_data.diagnostic_log_emitted_by_estimator = false;
+
+            const bool hadPreviousMarginalizedFrame = gMarginalizedFrameDebugClock.has_previous;
+            if (hadPreviousMarginalizedFrame) {
+                marg_data.diagnostic_wall_gap_ms =
+                    std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                        wallNow - gMarginalizedFrameDebugClock.previous_wall_time).count();
+                marg_data.diagnostic_wall_gap_available = std::isfinite(marg_data.diagnostic_wall_gap_ms);
+
+                if (std::isfinite(marg_data.timestamp) &&
+                    std::isfinite(gMarginalizedFrameDebugClock.previous_frontend_timestamp)) {
+                    marg_data.diagnostic_frontend_timestamp_gap_ms =
+                        (marg_data.timestamp - gMarginalizedFrameDebugClock.previous_frontend_timestamp) * 1000.0;
+                    marg_data.diagnostic_frontend_gap_available =
+                        std::isfinite(marg_data.diagnostic_frontend_timestamp_gap_ms);
+                }
+            }
+
+            gMarginalizedFrameDebugClock.has_previous = true;
+            gMarginalizedFrameDebugClock.previous_wall_time = wallNow;
+            gMarginalizedFrameDebugClock.previous_frontend_timestamp = marg_data.timestamp;
+
+            bool emitMarginalizedDebug = false;
+            if (marg_data.num_landmarks < 90) {
+                emitMarginalizedDebug = true;
+            }
+            if (marg_data.diagnostic_wall_gap_available &&
+                marg_data.diagnostic_wall_gap_ms > kMarginalizedFrameDebugGapMs) {
+                emitMarginalizedDebug = true;
+            }
+            if (marg_data.diagnostic_frontend_gap_available &&
+                (marg_data.diagnostic_frontend_timestamp_gap_ms > kMarginalizedFrameDebugGapMs ||
+                 marg_data.diagnostic_frontend_timestamp_gap_ms < 0.0)) {
+                emitMarginalizedDebug = true;
+            }
+            if (hadPreviousMarginalizedFrame &&
+                !marg_data.diagnostic_frontend_gap_available) {
+                emitMarginalizedDebug = true;
+            }
+
+            if (emitMarginalizedDebug) {
+                std::cout << std::fixed << std::setprecision(9)
+                          << "[MarginalizedFrameDebug] sequence_id="
+                          << marg_data.diagnostic_sequence_id
+                          << ", frontend_timestamp="
+                          << marg_data.timestamp
+                          << ", num_landmarks="
+                          << marg_data.num_landmarks
+                          << ", wall_timestamp="
+                          << marg_data.diagnostic_wall_timestamp
+                          << ", wall_gap_ms=";
+                if (marg_data.diagnostic_wall_gap_available) {
+                    std::cout << marg_data.diagnostic_wall_gap_ms;
+                } else {
+                    std::cout << "not_available";
+                }
+                std::cout << ", frontend_timestamp_gap_ms=";
+                if (marg_data.diagnostic_frontend_gap_available) {
+                    std::cout << marg_data.diagnostic_frontend_timestamp_gap_ms;
+                } else {
+                    std::cout << "not_available";
+                }
+                std::cout << ", thread_id="
+                          << std::this_thread::get_id()
+                          << std::endl;
+                marg_data.diagnostic_log_emitted_by_estimator = true;
+            }
 
             // 调用接口
             pSVIn2ORBWrapper->InjectSVIn2MarginalizedData(marg_data);

@@ -42,6 +42,7 @@
 #define INCLUDE_OKVIS_THREADEDKFVIO_HPP_
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -524,6 +525,14 @@ class ThreadedKFVio : public VioInterface {
 
   /// Max position measurements before dropping.
   const size_t maxPositionInputQueueSize_ = 10;
+  // [前端负载诊断] 只统计既有队列的溢出/跳帧，不参与任何调度或丢帧决策。
+  std::atomic<std::uint64_t> mnImageDropTotal_{0};
+  std::atomic<std::uint64_t> mnImuDropTotal_{0};
+  std::atomic<std::uint64_t> mnFrameSkipTotal_{0};
+  std::atomic<std::uint64_t> mnQueueDebugEventCount_{0};
+
+  void MaybeLogQueueDebug(const okvis::Time& frontendTimestamp, bool forceLog);
+  void RecordFrameSkipForDebug(const okvis::Time& frontendTimestamp);
   // std::vector<Eigen::Vector3d> stereoMatch_;  // Sharmin
   // okvis::kinematics::Transformation kf_T_WS_;     // Sharmin: keyframe pose.
   // std::vector<Eigen::Matrix<double, Dynamic, 3>> kf_points_; // Sharmin: keyframe points.

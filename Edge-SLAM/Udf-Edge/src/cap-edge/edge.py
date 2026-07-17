@@ -532,9 +532,9 @@ class Runner:
         ros_mappoints = []
         te = 0
         for map_point_i in range(map_point_xyz_data.shape[0]):
-            print(
-                "Process MapPoint: {} / {}".format(map_point_i, map_point_xyz_data.shape[0])
-            )
+            # print(
+            #     "Process MapPoint: {} / {}".format(map_point_i, map_point_xyz_data.shape[0])
+            # )
             # point
             map_data = map_point_xyz_data[map_point_i]
             ros_point = Point(x=map_data[0], y=map_data[1], z=map_data[2])

@@ -99,11 +99,16 @@ std::shared_ptr<okvis::MultiFrame> FrameSynchronizer::addNewFrame(std::shared_pt
     bufferPosition_ = (bufferPosition_ + 1) % max_frame_sync_buffer_size;
     if (frameBuffer_[bufferPosition_].first != nullptr && frameBuffer_[bufferPosition_].second != numCameras_) {
       LOG(ERROR) << "Dropping frame with id " << frameBuffer_[bufferPosition_].first->id();
+      mpDroppedIncompleteFrameCount_->fetch_add(1);
     }
     frameBuffer_[bufferPosition_].first = multiFrame;
     frameBuffer_[bufferPosition_].second = 0;
   }
   return multiFrame;
+}
+
+std::uint64_t FrameSynchronizer::GetDroppedIncompleteFrameCount() const {
+  return mpDroppedIncompleteFrameCount_->load();
 }
 
 // Inform the synchronizer that a frame in the multiframe has completed keypoint detection and description.

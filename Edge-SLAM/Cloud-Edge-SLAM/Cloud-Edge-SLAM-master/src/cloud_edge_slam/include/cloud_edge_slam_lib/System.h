@@ -26,6 +26,7 @@
 #include <thread>
 #include <opencv2/core/core.hpp>
 
+#include "BackendWriteController.h"
 #include "Tracking.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
@@ -196,6 +197,26 @@ public:
     LocalMapping* GetLocalMapping() { return mpLocalMapper; }
     Atlas *GetAtlas();
 
+    BackendWriteController *GetBackendWriteController();
+    const BackendWriteController *GetBackendWriteController() const;
+    BackendWriteState GetBackendWriteState() const;
+    bool CanInjectBackendKeyFrame() const;
+    std::uint64_t RecordSkippedNormalBackendInjection();
+    std::uint64_t GetSkippedNormalBackendInjectionCount() const;
+    void ResetSkippedNormalBackendInjectionCount();
+    std::uint64_t ExitBackendMerging();
+    MergeFinishResult FinishBackendMergingAndMaybeEnterReplaying();
+    std::uint64_t ExitBackendReplayingAndWaitForDrain();
+    LostTopologyRequest RequestLostTopologyTransition();
+    LostTopologyWaitResult WaitAndBeginLostTopologyTransition(std::uint64_t generation);
+    LostTopologyCompleteResult CompleteLostTopologyTransition(std::uint64_t generation);
+    LostTopologyCompleteResult FailLostTopologyTransition(std::uint64_t generation, const char *reason);
+    LostTopologyReleaseResult ReleaseLostBackendBlock(std::uint64_t generation);
+    LostTopologyReleaseWaitResult WaitForLostBackendBlockRelease(std::uint64_t generation);
+    void BeginBackendWriteShutdown();
+    bool IsLostBackendBlockRequested() const;
+    std::uint64_t RecordSkippedLiveNormalDuringBackendReplaying();
+
     // For Cloud
     // 一个新的Frame是由Tracker构建的，有一些关于摄像头的对象从这里得到最直接，传给构建CloudMap时使用
     CloudMerging *GetCloudMerger();
@@ -247,6 +268,9 @@ private:
     // Loop Closer. It searches loops with every new keyframe. If there is a loop it performs
     // a pose graph optimization and full bundle adjustment (in a new thread) afterwards.
     LoopClosing *mpLoopCloser;
+
+    // [BackendWriteGate] 控制 live 后端写入与 CloudMerge 结构性写图的并发边界。
+    BackendWriteController mBackendWriteController;
 
     // Cloud Map Merge
     CloudMerging *mpCloudMerger;

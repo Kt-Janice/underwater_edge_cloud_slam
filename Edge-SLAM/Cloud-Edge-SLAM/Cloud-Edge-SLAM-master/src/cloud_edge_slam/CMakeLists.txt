@@ -184,6 +184,7 @@ include_directories(
 
 ## Declare a C++ library
 add_library(${PROJECT_NAME}_lib SHARED
+  lib_src/BackendWriteController.cc
   lib_src/System.cc
   lib_src/Tracking.cc
   lib_src/LocalMapping.cc

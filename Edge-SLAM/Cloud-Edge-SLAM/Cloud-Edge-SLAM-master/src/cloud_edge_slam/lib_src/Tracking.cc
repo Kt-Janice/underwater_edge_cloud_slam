@@ -2658,6 +2658,15 @@ bool Tracking::NeedNewKeyFrame() {
             return false;
     }
 
+    if (mpSystem != nullptr) {
+        BackendWriteController *pBackendWriteController = mpSystem->GetBackendWriteController();
+        if (pBackendWriteController != nullptr) {
+            if (!pBackendWriteController->CanInjectBackendKeyFrame()) {
+                return false;
+            }
+        }
+    }
+
     if (mbOnlyTracking)
         return false;
 
@@ -2926,6 +2935,23 @@ bool Tracking::CloudNeedNewKeyFrame() {
 void Tracking::CreateNewKeyFrame() {
     if (mpLocalMapper->IsInitializing() && !mpAtlas->isImuInitialized())
         return;
+
+    BackendWriteController *pBackendWriteController = nullptr;
+    if (mpSystem != nullptr) {
+        pBackendWriteController = mpSystem->GetBackendWriteController();
+    }
+
+    BackendInjectionScope backendInjectionScope(pBackendWriteController);
+    if (pBackendWriteController != nullptr) {
+        if (!backendInjectionScope.IsActive()) {
+            static bool bLoggedBackendWriteBlocked = false;
+            if (!bLoggedBackendWriteBlocked) {
+                std::cout << "[BackendWriteGate] Block ORB Tracking CreateNewKeyFrame while backend write gate is not IDLE" << std::endl;
+                bLoggedBackendWriteBlocked = true;
+            }
+            return;
+        }
+    }
 
     if (!mpLocalMapper->SetNotStop(true))
         return;

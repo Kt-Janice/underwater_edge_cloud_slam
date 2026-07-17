@@ -18,6 +18,7 @@
 
 #include "CloudMerging.h"
 
+#include "System.h"
 #include "KeyFrame.h"
 #include "MapPoint.h"
 #include "Sim3Solver.h"
@@ -49,6 +50,8 @@
 #include <limits>
 #include <cmath>
 #include <map>
+#include <memory>
+#include <set>
 #include <vector>
 
 //cap-udf
@@ -194,6 +197,105 @@ const char *GetCloudMapCorrectionModeName(const CloudMapCorrectionMode mode) {
 
     return "UNKNOWN";
 }
+
+// [CloudMerging][ParentChain] 调试输出中统一格式化 KeyFrame id，避免空指针日志不完整。
+std::string FormatParentChainKeyFrameId(KeyFrame *pKF) {
+    if (pKF == nullptr) {
+        return "null";
+    }
+
+    return std::to_string(pKF->mnId);
+}
+
+class BackendMergeGuard {
+public:
+    explicit BackendMergeGuard(System *pSystem)
+        : mpSystem(pSystem),
+          mbActive(false),
+          mbExited(false) {
+        if (mpSystem == nullptr) {
+            std::cout << "[BackendWriteGate][ERROR] CloudMerging cannot enter MERGING because System is null." << std::endl;
+            return;
+        }
+
+        BackendWriteController *pController = mpSystem->GetBackendWriteController();
+        if (pController == nullptr) {
+            std::cout << "[BackendWriteGate][ERROR] CloudMerging cannot enter MERGING because BackendWriteController is null." << std::endl;
+            return;
+        }
+
+        mbActive = pController->EnterMergingAndWait();
+        if (!mbActive) {
+            std::cout << "[BackendWriteGate] CloudMerging did not enter MERGING because LOST or shutdown backend block is active." << std::endl;
+        }
+    }
+
+    ~BackendMergeGuard() {
+        if (mbActive && !mbExited) {
+            ExitToIdle();
+        }
+    }
+
+    BackendMergeGuard(const BackendMergeGuard &) = delete;
+    BackendMergeGuard &operator=(const BackendMergeGuard &) = delete;
+    BackendMergeGuard(BackendMergeGuard &&) = delete;
+    BackendMergeGuard &operator=(BackendMergeGuard &&) = delete;
+
+    bool IsActive() const {
+        return mbActive && !mbExited;
+    }
+
+    bool ExitToReplaying(const size_t deferredCount) {
+        if (!IsActive()) {
+            return false;
+        }
+
+        const MergeFinishResult finishResult = mpSystem->FinishBackendMergingAndMaybeEnterReplaying();
+        const bool bEnteredReplaying = finishResult == MergeFinishResult::ENTERED_REPLAYING;
+
+        if (bEnteredReplaying) {
+            mbExited = true;
+            mbActive = false;
+
+            std::cout << "[BackendWriteGate] Enter REPLAYING after CloudMerge, deferred="
+                      << deferredCount
+                      << std::endl;
+        } else {
+            mbExited = true;
+            mbActive = false;
+            if (finishResult == MergeFinishResult::EXITED_TO_IDLE_LOST) {
+                std::cout << "[BackendWriteGate] Skip REPLAYING because LOST topology block is pending." << std::endl;
+            } else if (finishResult == MergeFinishResult::EXITED_TO_IDLE_SHUTDOWN) {
+                std::cout << "[BackendWriteGate] Skip REPLAYING because backend shutdown is active." << std::endl;
+            } else {
+                std::cout << "[BackendWriteGate][WARNING] CloudMerge could not enter REPLAYING after MERGING." << std::endl;
+            }
+        }
+
+        return bEnteredReplaying;
+    }
+
+    std::uint64_t ExitToIdle() {
+        if (!IsActive()) {
+            return 0;
+        }
+
+        const std::uint64_t skippedNormalInjections = mpSystem->ExitBackendMerging();
+        mbExited = true;
+        mbActive = false;
+
+        std::cout << "[BackendWriteGate] Exit MERGING after CloudMerge, skipped_normal_injections="
+                  << skippedNormalInjections
+                  << std::endl;
+
+        return skippedNormalInjections;
+    }
+
+private:
+    System *mpSystem;
+    bool mbActive;
+    bool mbExited;
+};
 
 // [Sim3合并实验] 创建默认失败状态，避免未初始化数值进入日志。
 CloudMergeSim3Result MakeCloudMergeSim3Result() {
@@ -1213,9 +1315,9 @@ bool BuildTimeLinearCorrectionWeights(
 
 } // namespace
 
-CloudMerging::CloudMerging(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC, const bool bWork, const bool bMergeAnyway, MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer, const bool bOldUdf, const bool bNewUdf) :
+CloudMerging::CloudMerging(System *pSystem, Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC, const bool bWork, const bool bMergeAnyway, MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer, const bool bOldUdf, const bool bNewUdf) :
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
-    mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
+    mpSystem(pSystem), mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
     mbStopGBA(false), mpThreadGBA(nullptr), mbFixScale(bFixScale), mnFullBAIdx(0), mnMergeNumCoincidences(0),
     mbMergeDetected(false), mnMergeNumNotFound(0), mbActiveCM(bActiveLC), mbMergeAnyway(bMergeAnyway), mbWork(bWork),
     mpMapDrawer(pMapDrawer), mpFrameDrawer(pFrameDrawer), mbOldUdf(bOldUdf), mbNewUdf(bNewUdf),
@@ -1360,6 +1462,13 @@ void CloudMerging::Run(bool bOnline) {
 
             // [Sim3合并实验] SIM3_ONLY 失败时不自动 fallback 到旧 two-anchor 逻辑，避免实验结果混淆。
             bool bSkipCloudMergeDueToCorrectionFailure = false;
+            std::unique_ptr<BackendMergeGuard> pBackendMergeGuard;
+            auto ensureBackendMergeGuard = [&]() -> bool {
+                if (!pBackendMergeGuard) {
+                    pBackendMergeGuard.reset(new BackendMergeGuard(mpSystem));
+                }
+                return pBackendMergeGuard->IsActive();
+            };
 
             if (mbOldUdf || mbNewUdf) {
                 if (mpEdgeFrontCloudKeyFrameMatch.size() > 0) {
@@ -1499,6 +1608,10 @@ void CloudMerging::Run(bool bOnline) {
                                                 timeGaps);
 
                                             if (bSim3Ok) {
+                                                if (!ensureBackendMergeGuard()) {
+                                                    bSkipCloudMergeDueToCorrectionFailure = true;
+                                                    cloudMergeSim3Result.failureReason = "backend_gate_blocked";
+                                                } else {
                                                 const bool bApplyOk = ApplySim3ToCloudMap(
                                                     mpCurrentCloudMap,
                                                     cloudMapKeyFrames,
@@ -1542,6 +1655,7 @@ void CloudMerging::Run(bool bOnline) {
                                                 } else {
                                                     cloudMergeSim3Result.failureReason = "apply_failed";
                                                 }
+                                                }
                                             }
 
                                             if (!bSelectedCorrectionApplied) {
@@ -1578,6 +1692,10 @@ void CloudMerging::Run(bool bOnline) {
 
                                                 return ComputeTimeLinearCorrectionWeight(pKF->mTimeStamp, t_start, t_end);
                                             };
+
+                                            if (!ensureBackendMergeGuard()) {
+                                                bSkipCloudMergeDueToCorrectionFailure = true;
+                                            }
 
                                             // =================================================================================
                                             // 【阶段 3：劫持 CloudMap 关键帧，执行 双锚点复合扭曲】
@@ -1723,6 +1841,19 @@ void CloudMerging::Run(bool bOnline) {
             if (!bSkipCloudMergeDueToCorrectionFailure && (bComputeEdgeFront || mbMergeAnyway)) {
                 Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
 
+                if (!ensureBackendMergeGuard()) {
+                    bSkipCloudMergeDueToCorrectionFailure = true;
+                }
+
+                if (bSkipCloudMergeDueToCorrectionFailure) {
+                    std::cout << "[BackendWriteGate] Skip CloudMergeMap because backend gate did not enter MERGING." << std::endl;
+                    mbRunning = false;
+                    mpCurrentCloudMap = nullptr;
+                    mpCurrentEdgeFrontMap = nullptr;
+                    mpCurrentEdgeBackMap = nullptr;
+                    continue;
+                }
+
                 bool bRelaunchBA = false;
 
                 if (isRunningGBA()) {
@@ -1758,6 +1889,140 @@ void CloudMerging::Run(bool bOnline) {
                 // 【核心修复 2：后段地图的弹性最近邻匹配】
                 double matchToleranceTimeBack = 0.05; 
 
+                // [SecondMergeMatchDebug] 只读统计第二次匹配候选与 MERGING deferred 帧的时间覆盖关系。
+                const double unavailableTimestamp = std::numeric_limits<double>::quiet_NaN();
+                double newEdgeFrontTimeMin = unavailableTimestamp;
+                double newEdgeFrontTimeMax = unavailableTimestamp;
+                double edgeBackTimeMin = unavailableTimestamp;
+                double edgeBackTimeMax = unavailableTimestamp;
+                double globalMinAbsDt = std::numeric_limits<double>::infinity();
+                unsigned long globalMinNewEdgeFrontKeyFrameId = 0;
+                double globalMinNewEdgeFrontTimestamp = unavailableTimestamp;
+                unsigned long globalMinEdgeBackKeyFrameId = 0;
+                double globalMinEdgeBackTimestamp = unavailableTimestamp;
+                bool hasGlobalMinAbsDt = false;
+
+                for (KeyFrame *pNewEdgeFrontKF : newEdgeFrontMapKeyFrames) {
+                    if (pNewEdgeFrontKF == nullptr) {
+                        continue;
+                    }
+
+                    const double timestamp = pNewEdgeFrontKF->mTimeStamp;
+                    if (!std::isfinite(timestamp)) {
+                        continue;
+                    }
+
+                    if (!std::isfinite(newEdgeFrontTimeMin) || timestamp < newEdgeFrontTimeMin) {
+                        newEdgeFrontTimeMin = timestamp;
+                    }
+
+                    if (!std::isfinite(newEdgeFrontTimeMax) || timestamp > newEdgeFrontTimeMax) {
+                        newEdgeFrontTimeMax = timestamp;
+                    }
+                }
+
+                for (KeyFrame *pEdgeBackKF : edgeBackMapKeyFrames) {
+                    if (pEdgeBackKF == nullptr) {
+                        continue;
+                    }
+
+                    const double timestamp = pEdgeBackKF->mTimeStamp;
+                    if (!std::isfinite(timestamp)) {
+                        continue;
+                    }
+
+                    if (!std::isfinite(edgeBackTimeMin) || timestamp < edgeBackTimeMin) {
+                        edgeBackTimeMin = timestamp;
+                    }
+
+                    if (!std::isfinite(edgeBackTimeMax) || timestamp > edgeBackTimeMax) {
+                        edgeBackTimeMax = timestamp;
+                    }
+                }
+
+                for (KeyFrame *pNewEdgeFrontKF : newEdgeFrontMapKeyFrames) {
+                    if (pNewEdgeFrontKF == nullptr || !std::isfinite(pNewEdgeFrontKF->mTimeStamp)) {
+                        continue;
+                    }
+
+                    for (KeyFrame *pEdgeBackKF : edgeBackMapKeyFrames) {
+                        if (pEdgeBackKF == nullptr || !std::isfinite(pEdgeBackKF->mTimeStamp)) {
+                            continue;
+                        }
+
+                        const double deltaTime = std::abs(
+                            pEdgeBackKF->mTimeStamp - pNewEdgeFrontKF->mTimeStamp);
+                        if (deltaTime < globalMinAbsDt) {
+                            globalMinAbsDt = deltaTime;
+                            globalMinNewEdgeFrontKeyFrameId = pNewEdgeFrontKF->mnId;
+                            globalMinNewEdgeFrontTimestamp = pNewEdgeFrontKF->mTimeStamp;
+                            globalMinEdgeBackKeyFrameId = pEdgeBackKF->mnId;
+                            globalMinEdgeBackTimestamp = pEdgeBackKF->mTimeStamp;
+                            hasGlobalMinAbsDt = true;
+                        }
+                    }
+                }
+
+                std::vector<double> mergeDeferredTimestamps;
+                if (::pSVIn2ORBWrapper != nullptr) {
+                    mergeDeferredTimestamps =
+                        ::pSVIn2ORBWrapper->GetMergeDeferredTimestampsSnapshot();
+                }
+
+                double deferredTimeMin = unavailableTimestamp;
+                double deferredTimeMax = unavailableTimestamp;
+                double deferredGlobalMinAbsDt = std::numeric_limits<double>::infinity();
+                double deferredBestTimestamp = unavailableTimestamp;
+                unsigned long deferredBestNewEdgeFrontKeyFrameId = 0;
+                double deferredBestNewEdgeFrontTimestamp = unavailableTimestamp;
+                bool hasDeferredGlobalMinAbsDt = false;
+                size_t deferredMatchableCountUnder005 = 0;
+
+                for (const double deferredTimestamp : mergeDeferredTimestamps) {
+                    if (!std::isfinite(deferredTimestamp)) {
+                        continue;
+                    }
+
+                    if (!std::isfinite(deferredTimeMin) || deferredTimestamp < deferredTimeMin) {
+                        deferredTimeMin = deferredTimestamp;
+                    }
+
+                    if (!std::isfinite(deferredTimeMax) || deferredTimestamp > deferredTimeMax) {
+                        deferredTimeMax = deferredTimestamp;
+                    }
+
+                    double minDeferredToNewEdgeFrontDt = std::numeric_limits<double>::infinity();
+                    KeyFrame *pBestNewEdgeFrontKF = nullptr;
+                    for (KeyFrame *pNewEdgeFrontKF : newEdgeFrontMapKeyFrames) {
+                        if (pNewEdgeFrontKF == nullptr || !std::isfinite(pNewEdgeFrontKF->mTimeStamp)) {
+                            continue;
+                        }
+
+                        const double deltaTime = std::abs(
+                            deferredTimestamp - pNewEdgeFrontKF->mTimeStamp);
+                        if (deltaTime < minDeferredToNewEdgeFrontDt) {
+                            minDeferredToNewEdgeFrontDt = deltaTime;
+                            pBestNewEdgeFrontKF = pNewEdgeFrontKF;
+                        }
+                    }
+
+                    if (pBestNewEdgeFrontKF == nullptr) {
+                        continue;
+                    }
+
+                    if (minDeferredToNewEdgeFrontDt < matchToleranceTimeBack) {
+                        deferredMatchableCountUnder005++;
+                    }
+
+                    if (minDeferredToNewEdgeFrontDt < deferredGlobalMinAbsDt) {
+                        deferredGlobalMinAbsDt = minDeferredToNewEdgeFrontDt;
+                        deferredBestTimestamp = deferredTimestamp;
+                        deferredBestNewEdgeFrontKeyFrameId = pBestNewEdgeFrontKF->mnId;
+                        deferredBestNewEdgeFrontTimestamp = pBestNewEdgeFrontKF->mTimeStamp;
+                        hasDeferredGlobalMinAbsDt = true;
+                    }
+                }
+
                 for (unsigned long newEdgeFrontKF_i = 0; newEdgeFrontKF_i < newEdgeFrontMapKeyFrames.size(); newEdgeFrontKF_i++) {
                     double minDelta = 1e9;
                     int bestBackIdx = -1;
@@ -1780,6 +2045,66 @@ void CloudMerging::Run(bool bOnline) {
                         edgeBackHaveMatchFlag[bestBackIdx] = true;
                     }
                 }
+
+                std::cout << "[SecondMergeMatchDebug]" << std::endl;
+                std::cout << "edge_front_map_id=" << mpCurrentEdgeFrontMap->GetId() << std::endl;
+                std::cout << "edge_back_map_id=" << mpCurrentEdgeBackMap->GetId() << std::endl;
+                std::cout << "new_edge_front_kf_count=" << newEdgeFrontMapKeyFrames.size() << std::endl;
+                std::cout << "edge_back_kf_count=" << edgeBackMapKeyFrames.size() << std::endl;
+                std::cout << "new_edge_front_time_min=" << newEdgeFrontTimeMin << std::endl;
+                std::cout << "new_edge_front_time_max=" << newEdgeFrontTimeMax << std::endl;
+                std::cout << "edge_back_time_min=" << edgeBackTimeMin << std::endl;
+                std::cout << "edge_back_time_max=" << edgeBackTimeMax << std::endl;
+                std::cout << "timestamp_threshold=" << matchToleranceTimeBack << std::endl;
+                std::cout << "accepted_pair_count="
+                          << mpNewEdgeFrontEdgeBackKeyFrameMatch.size()
+                          << std::endl;
+                if (hasGlobalMinAbsDt) {
+                    std::cout << "global_min_abs_dt=" << globalMinAbsDt << std::endl;
+                    std::cout << "global_min_new_edge_front_kf_id="
+                              << globalMinNewEdgeFrontKeyFrameId
+                              << std::endl;
+                    std::cout << "global_min_new_edge_front_timestamp="
+                              << globalMinNewEdgeFrontTimestamp
+                              << std::endl;
+                    std::cout << "global_min_edge_back_kf_id="
+                              << globalMinEdgeBackKeyFrameId
+                              << std::endl;
+                    std::cout << "global_min_edge_back_timestamp="
+                              << globalMinEdgeBackTimestamp
+                              << std::endl;
+                } else {
+                    std::cout << "global_min_abs_dt=not_available" << std::endl;
+                    std::cout << "global_min_new_edge_front_kf_id=not_available" << std::endl;
+                    std::cout << "global_min_new_edge_front_timestamp=not_available" << std::endl;
+                    std::cout << "global_min_edge_back_kf_id=not_available" << std::endl;
+                    std::cout << "global_min_edge_back_timestamp=not_available" << std::endl;
+                }
+                std::cout << "deferred_count=" << mergeDeferredTimestamps.size() << std::endl;
+                std::cout << "deferred_time_min=" << deferredTimeMin << std::endl;
+                std::cout << "deferred_time_max=" << deferredTimeMax << std::endl;
+                if (hasDeferredGlobalMinAbsDt) {
+                    std::cout << "deferred_global_min_abs_dt="
+                              << deferredGlobalMinAbsDt
+                              << std::endl;
+                    std::cout << "deferred_best_timestamp="
+                              << deferredBestTimestamp
+                              << std::endl;
+                    std::cout << "deferred_best_new_edge_front_kf_id="
+                              << deferredBestNewEdgeFrontKeyFrameId
+                              << std::endl;
+                    std::cout << "deferred_best_new_edge_front_timestamp="
+                              << deferredBestNewEdgeFrontTimestamp
+                              << std::endl;
+                } else {
+                    std::cout << "deferred_global_min_abs_dt=not_available" << std::endl;
+                    std::cout << "deferred_best_timestamp=not_available" << std::endl;
+                    std::cout << "deferred_best_new_edge_front_kf_id=not_available" << std::endl;
+                    std::cout << "deferred_best_new_edge_front_timestamp=not_available" << std::endl;
+                }
+                std::cout << "deferred_matchable_count_under_0_05="
+                          << deferredMatchableCountUnder005
+                          << std::endl;
 
                 if (mpNewEdgeFrontEdgeBackKeyFrameMatch.size() < 1) {
                     cerr << "\033[1;31m匹配EdgeBack和New Cloud Map的KeyFrames数量过少\033[0m" << endl;
@@ -1907,6 +2232,20 @@ void CloudMerging::Run(bool bOnline) {
             cerr << "==================================" << endl;
             cerr << "CloudMerge Time: " << nCloudMerge << endl;
             cerr << "==================================" << endl;
+
+            if (pBackendMergeGuard) {
+                if (pBackendMergeGuard->IsActive()) {
+                    if (::pSVIn2ORBWrapper != nullptr && ::pSVIn2ORBWrapper->CanReplayDeferredBuffers()) {
+                        const size_t deferredCount = ::pSVIn2ORBWrapper->GetMergeDeferredFrameCount();
+                        if (pBackendMergeGuard->ExitToReplaying(deferredCount)) {
+                            ::pSVIn2ORBWrapper->ReplayMergeDeferredBuffer();
+                        }
+                    } else {
+                        std::cout << "[BackendWriteGate][WARNING] Skip MergeDeferredBuffer replay because SVIn2ORBWrapper replay entry is invalid." << std::endl;
+                        pBackendMergeGuard->ExitToIdle();
+                    }
+                }
+            }
         }
 
         ResetIfRequested();
@@ -2943,39 +3282,270 @@ void CloudMerging::CloudMergeMap(
         pMainMap->mvMergedMapIds.push_back(pMergedMap->GetId());
     }
 
-    KeyFrame *pNewChild;
-    KeyFrame *pNewParent;
-    pMergedMap->GetOriginKF()->SetFirstConnection(false);
+    auto logParentChainBreak = [](const std::string &reason,
+                                  KeyFrame *pCurrentChild,
+                                  KeyFrame *pOldParent,
+                                  KeyFrame *pCurrentNewParent,
+                                  const size_t iteration,
+                                  const size_t visitedSize) {
+        std::cerr << "[CloudMerging][ParentChain][WARNING] " << reason
+                  << ", current child id = " << FormatParentChainKeyFrameId(pCurrentChild)
+                  << ", old parent id = " << FormatParentChainKeyFrameId(pOldParent)
+                  << ", new parent id = " << FormatParentChainKeyFrameId(pCurrentNewParent)
+                  << ", iteration = " << iteration
+                  << ", visited size = " << visitedSize
+                  << std::endl;
+    };
+
+    KeyFrame *pNewChild = nullptr;
+    KeyFrame *pNewParent = nullptr;
+    KeyFrame *pMergedOriginKF = pMergedMap->GetOriginKF();
+
+    std::cerr << "[CloudMerging][ParentChain] pRandMergedKF id = "
+              << FormatParentChainKeyFrameId(pRandMergedKF)
+              << std::endl;
+    std::cerr << "[CloudMerging][ParentChain] pRandMainKF id = "
+              << FormatParentChainKeyFrameId(pRandMainKF)
+              << std::endl;
+
+    std::cerr << "[CloudMerging][ParentChain] before SetFirstConnection, origin KF id = "
+              << FormatParentChainKeyFrameId(pMergedOriginKF)
+              << std::endl;
+    if (pMergedOriginKF != nullptr) {
+        pMergedOriginKF->SetFirstConnection(false);
+    } else {
+        std::cerr << "[CloudMerging][ParentChain][WARNING] merged map origin KF is null, skip SetFirstConnection."
+                  << std::endl;
+    }
+    std::cerr << "[CloudMerging][ParentChain] after SetFirstConnection" << std::endl;
+
+    std::cerr << "[CloudMerging][ParentChain] before GetParent, child KF id = "
+              << FormatParentChainKeyFrameId(pRandMergedKF)
+              << std::endl;
     pNewChild = pRandMergedKF->GetParent(); 
+    std::cerr << "[CloudMerging][ParentChain] after GetParent, pNewChild id = "
+              << FormatParentChainKeyFrameId(pNewChild)
+              << std::endl;
     pNewParent = pRandMergedKF;             
-    pRandMergedKF->ChangeParent(pRandMainKF);
+    std::cerr << "[CloudMerging][ParentChain] before ChangeParent, child id = "
+              << FormatParentChainKeyFrameId(pRandMergedKF)
+              << ", new parent id = "
+              << FormatParentChainKeyFrameId(pRandMainKF)
+              << std::endl;
+    if (pRandMergedKF != pRandMainKF) {
+        pRandMergedKF->ChangeParent(pRandMainKF);
+    } else {
+        logParentChainBreak(
+            "pRandMergedKF equals pRandMainKF, skip initial ChangeParent to avoid self-parent",
+            pRandMergedKF,
+            nullptr,
+            pRandMainKF,
+            0,
+            0);
+        pNewChild = nullptr;
+    }
+    std::cerr << "[CloudMerging][ParentChain] after ChangeParent" << std::endl;
+
+    std::set<KeyFrame *> visitedParentChainKFs;
+    size_t parentChainIteration = 0;
+    size_t maxParentChainIterations = vpMergedMapKeyFrames.size() + 10;
+    if (maxParentChainIterations < 10) {
+        maxParentChainIterations = 10000;
+        std::cerr << "[CloudMerging][ParentChain][WARNING] merged map keyframe count is too small for max iteration, fallback max_parent_chain_iterations = "
+                  << maxParentChainIterations
+                  << std::endl;
+    }
+    std::cerr << "[CloudMerging][ParentChain] max_parent_chain_iterations = "
+              << maxParentChainIterations
+              << std::endl;
+
     while (pNewChild) 
     {
-        pNewChild->EraseChild(pNewParent); 
-        KeyFrame *pOldParent = pNewChild->GetParent();
+        parentChainIteration++;
 
+        if (parentChainIteration > maxParentChainIterations) {
+            logParentChainBreak(
+                "parent-chain iteration exceeds max_parent_chain_iterations",
+                pNewChild,
+                nullptr,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+
+        if (visitedParentChainKFs.find(pNewChild) != visitedParentChainKFs.end()) {
+            logParentChainBreak(
+                "visited pNewChild again, possible parent-chain cycle",
+                pNewChild,
+                nullptr,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+        visitedParentChainKFs.insert(pNewChild);
+
+        if (pNewChild == pNewParent) {
+            logParentChainBreak(
+                "pNewChild equals pNewParent, skip ChangeParent to avoid self-parent",
+                pNewChild,
+                nullptr,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+
+        if (pNewChild == pRandMainKF) {
+            logParentChainBreak(
+                "pNewChild reaches pRandMainKF, stop before changing main-map anchor parent",
+                pNewChild,
+                nullptr,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+
+        std::cerr << "[CloudMerging][ParentChain] iteration = "
+                  << parentChainIteration
+                  << ", pNewChild id = " << FormatParentChainKeyFrameId(pNewChild)
+                  << ", pNewParent id = " << FormatParentChainKeyFrameId(pNewParent)
+                  << std::endl;
+
+        std::cerr << "[CloudMerging][ParentChain] before EraseChild, child id = "
+                  << FormatParentChainKeyFrameId(pNewChild)
+                  << ", erased child id = "
+                  << FormatParentChainKeyFrameId(pNewParent)
+                  << std::endl;
+        pNewChild->EraseChild(pNewParent); 
+        std::cerr << "[CloudMerging][ParentChain] after EraseChild" << std::endl;
+
+        std::cerr << "[CloudMerging][ParentChain] before GetParent in loop, child id = "
+                  << FormatParentChainKeyFrameId(pNewChild)
+                  << std::endl;
+        KeyFrame *pOldParent = pNewChild->GetParent();
+        std::cerr << "[CloudMerging][ParentChain] iteration = "
+                  << parentChainIteration
+                  << ", pNewChild id = " << FormatParentChainKeyFrameId(pNewChild)
+                  << ", pNewParent id = " << FormatParentChainKeyFrameId(pNewParent)
+                  << ", pOldParent id = " << FormatParentChainKeyFrameId(pOldParent)
+                  << std::endl;
+
+        if (pNewChild == pOldParent) {
+            logParentChainBreak(
+                "pNewChild equals pOldParent, possible self-cycle",
+                pNewChild,
+                pOldParent,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+
+        if (pOldParent == pNewParent) {
+            logParentChainBreak(
+                "pOldParent equals pNewParent, possible two-node cycle",
+                pNewChild,
+                pOldParent,
+                pNewParent,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
+
+        bool bStopAfterCurrentChange = false;
+        if (pOldParent == pRandMainKF) {
+            bStopAfterCurrentChange = true;
+            std::cerr << "[CloudMerging][ParentChain][WARNING] pOldParent is pRandMainKF, will stop after current safe ChangeParent."
+                      << std::endl;
+        }
+
+        std::cerr << "[CloudMerging][ParentChain] before ChangeParent in loop, child id = "
+                  << FormatParentChainKeyFrameId(pNewChild)
+                  << ", new parent id = "
+                  << FormatParentChainKeyFrameId(pNewParent)
+                  << std::endl;
         pNewChild->ChangeParent(pNewParent);
+        std::cerr << "[CloudMerging][ParentChain] after ChangeParent in loop" << std::endl;
+
+        if (bStopAfterCurrentChange) {
+            logParentChainBreak(
+                "next parent-chain node would be pRandMainKF, stop to avoid parent cycle",
+                pOldParent,
+                pOldParent,
+                pNewChild,
+                parentChainIteration,
+                visitedParentChainKFs.size());
+            break;
+        }
 
         pNewParent = pNewChild;
         pNewChild = pOldParent;
     }
 
+    std::cerr << "[CloudMerging][ParentChain] before pRandMainKF->UpdateConnections, id = "
+              << FormatParentChainKeyFrameId(pRandMainKF)
+              << std::endl;
     pRandMainKF->UpdateConnections();
+    std::cerr << "[CloudMerging][ParentChain] after pRandMainKF->UpdateConnections" << std::endl;
 
+    std::cerr << "[CloudMerging][ParentChain] before spMergedMapWindowKFs UpdateConnections loop, size = "
+              << spMergedMapWindowKFs.size()
+              << std::endl;
+    size_t mergedWindowUpdateIndex = 0;
     for (KeyFrame *pKFi : spMergedMapWindowKFs) {
         if (!pKFi || pKFi->isBad()) {
+            std::cerr << "[CloudMerging][ParentChain] skip merged-window UpdateConnections index = "
+                      << mergedWindowUpdateIndex
+                      << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                      << std::endl;
+            mergedWindowUpdateIndex++;
             continue;
         }
 
+        std::cerr << "[CloudMerging][ParentChain] before merged-window UpdateConnections index = "
+                  << mergedWindowUpdateIndex
+                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                  << std::endl;
         pKFi->UpdateConnections();
+        std::cerr << "[CloudMerging][ParentChain] after merged-window UpdateConnections index = "
+                  << mergedWindowUpdateIndex
+                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                  << std::endl;
+        mergedWindowUpdateIndex++;
     }
+    std::cerr << "[CloudMerging][ParentChain] after spMergedMapWindowKFs UpdateConnections loop" << std::endl;
+
+    std::cerr << "[CloudMerging][ParentChain] before spMainMapWindowKFs UpdateConnections loop, size = "
+              << spMainMapWindowKFs.size()
+              << std::endl;
+    size_t mainWindowUpdateIndex = 0;
     for (KeyFrame *pKFi : spMainMapWindowKFs) {
         if (!pKFi || pKFi->isBad()) {
+            std::cerr << "[CloudMerging][ParentChain] skip main-window UpdateConnections index = "
+                      << mainWindowUpdateIndex
+                      << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                      << std::endl;
+            mainWindowUpdateIndex++;
             continue;
         }
 
+        std::cerr << "[CloudMerging][ParentChain] before main-window UpdateConnections index = "
+                  << mainWindowUpdateIndex
+                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                  << std::endl;
         pKFi->UpdateConnections();
+        std::cerr << "[CloudMerging][ParentChain] after main-window UpdateConnections index = "
+                  << mainWindowUpdateIndex
+                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
+                  << std::endl;
+        mainWindowUpdateIndex++;
     }
+    std::cerr << "[CloudMerging][ParentChain] after spMainMapWindowKFs UpdateConnections loop" << std::endl;
+
+    std::cerr << "[CloudMerging][ParentChain] parent-chain rewiring finished" << std::endl;
 
     std::cerr << "[Merge]: Start welding bundle adjustment" << std::endl;
 

@@ -209,7 +209,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC); // mSensor!=MONOCULAR);
     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
 
-    mpCloudMerger = new CloudMerging(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC, bCloudMerge, bMergeAnyway, mpMapDrawer, mpFrameDrawer, bOldUdf, bNewUdf); //合并线程初始化
+    mpCloudMerger = new CloudMerging(this, mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC, bCloudMerge, bMergeAnyway, mpMapDrawer, mpFrameDrawer, bOldUdf, bNewUdf); //合并线程初始化
     mptCloudMerging = new thread(&ORB_SLAM3::CloudMerging::Run, mpCloudMerger, bCloudOnline); 
 
     //Set pointers between threads
@@ -466,6 +466,82 @@ void System::InsertCloudMap(Map *pMap) {
     mpCloudMerger->InsertCloudMap(pMap);
 }
 
+BackendWriteController *System::GetBackendWriteController() {
+    return &mBackendWriteController;
+}
+
+const BackendWriteController *System::GetBackendWriteController() const {
+    return &mBackendWriteController;
+}
+
+BackendWriteState System::GetBackendWriteState() const {
+    return mBackendWriteController.GetState();
+}
+
+bool System::CanInjectBackendKeyFrame() const {
+    return mBackendWriteController.CanInjectBackendKeyFrame();
+}
+
+std::uint64_t System::RecordSkippedNormalBackendInjection() {
+    return mBackendWriteController.RecordSkippedNormalInjection();
+}
+
+std::uint64_t System::GetSkippedNormalBackendInjectionCount() const {
+    return mBackendWriteController.GetSkippedNormalInjections();
+}
+
+void System::ResetSkippedNormalBackendInjectionCount() {
+    mBackendWriteController.ResetSkippedNormalInjections();
+}
+
+std::uint64_t System::ExitBackendMerging() {
+    return mBackendWriteController.ExitMerging();
+}
+
+MergeFinishResult System::FinishBackendMergingAndMaybeEnterReplaying() {
+    return mBackendWriteController.FinishMergingAndMaybeEnterReplaying();
+}
+
+std::uint64_t System::ExitBackendReplayingAndWaitForDrain() {
+    return mBackendWriteController.ExitReplayingAndWaitForDrain();
+}
+
+LostTopologyRequest System::RequestLostTopologyTransition() {
+    return mBackendWriteController.RequestLostTopologyTransition();
+}
+
+LostTopologyWaitResult System::WaitAndBeginLostTopologyTransition(std::uint64_t generation) {
+    return mBackendWriteController.WaitAndBeginLostTopologyTransition(generation);
+}
+
+LostTopologyCompleteResult System::CompleteLostTopologyTransition(std::uint64_t generation) {
+    return mBackendWriteController.CompleteLostTopologyTransition(generation);
+}
+
+LostTopologyCompleteResult System::FailLostTopologyTransition(std::uint64_t generation, const char *reason) {
+    return mBackendWriteController.FailLostTopologyTransition(generation, reason);
+}
+
+LostTopologyReleaseResult System::ReleaseLostBackendBlock(std::uint64_t generation) {
+    return mBackendWriteController.ReleaseLostBackendBlock(generation);
+}
+
+LostTopologyReleaseWaitResult System::WaitForLostBackendBlockRelease(std::uint64_t generation) {
+    return mBackendWriteController.WaitForLostBackendBlockRelease(generation);
+}
+
+void System::BeginBackendWriteShutdown() {
+    mBackendWriteController.BeginBackendWriteShutdown();
+}
+
+bool System::IsLostBackendBlockRequested() const {
+    return mBackendWriteController.IsLostBackendBlockRequested();
+}
+
+std::uint64_t System::RecordSkippedLiveNormalDuringBackendReplaying() {
+    return mBackendWriteController.RecordSkippedLiveNormalDuringReplaying();
+}
+
 void System::ActivateLocalizationMode() {
     unique_lock<mutex> lock(mMutexMode);
     mbActivateLocalizationMode = true;
@@ -501,6 +577,8 @@ void System::Shutdown() {
         unique_lock<mutex> lock(mMutexReset);
         mbShutDown = true;
     }
+
+    BeginBackendWriteShutdown();
 
     cout << "Shutdown" << endl;
 

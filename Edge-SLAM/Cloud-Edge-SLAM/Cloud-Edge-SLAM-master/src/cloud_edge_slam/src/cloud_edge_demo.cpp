@@ -23,11 +23,14 @@
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <chrono>
+#include <condition_variable>
 #include <opencv2/imgcodecs.hpp>
+#include <system_error>
 #include <sys/stat.h> 
 #include <sys/types.h> 
 
@@ -50,6 +53,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/core.hpp>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -124,6 +128,66 @@ using namespace std;
 
 typedef actionlib::SimpleActionClient<cloud_edge_slam::CloudSlamAction> CloudClient;
 // typedef actionlib::SimpleActionClient<actionlib_tutorials::FibonacciAction> CloudClient;
+
+// [阶段5B修改] LOST 上传起点的最终候选模式；实际模式在检查 cache/range 后确定。
+enum class LostUploadStartMode {
+    COMMITTED_BOUNDARY = 0,
+    LEGACY_FALLBACK = 1
+};
+
+// [阶段5B修改] detached 上传线程只读取该按值请求，不读取可变 LOST 状态。
+struct LostUploadRequest {
+    std::uint64_t generation = 0;
+    std::uint64_t boundary_generation = 0;
+    double original_start_frontend = 0.0;
+    double end_frontend = 0.0;
+    bool committed_valid = false;
+    double committed_frontend = 0.0;
+    double image_delay = 0.0;
+    double overlap_sec = 0.5;
+    LostUploadStartMode candidate_mode = LostUploadStartMode::LEGACY_FALLBACK;
+};
+
+enum class LostRecoveryUploadPendingState {
+    EMPTY = 0,
+    AWAITING_RECOVERY = 1,
+    AVAILABLE = 2,
+    DISPATCHING = 3,
+    CONSUMED = 4
+};
+
+enum class LostUploadLaunchDecision {
+    PENDING = 0,
+    RUN = 1,
+    CANCEL = 2
+};
+
+struct LostUploadLaunchGate {
+    std::mutex mutex;
+    std::condition_variable condition;
+    LostUploadLaunchDecision decision = LostUploadLaunchDecision::PENDING;
+};
+
+// [前端负载诊断] 标记诊断范围，不参与状态机、队列或云图合并控制流。
+class RuntimePhaseDiagnosticScope {
+public:
+    explicit RuntimePhaseDiagnosticScope(std::atomic<int> &activeCount)
+        : mActiveCount(activeCount) {
+        mActiveCount.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    ~RuntimePhaseDiagnosticScope() {
+        mActiveCount.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    RuntimePhaseDiagnosticScope(const RuntimePhaseDiagnosticScope &) = delete;
+    RuntimePhaseDiagnosticScope &operator=(const RuntimePhaseDiagnosticScope &) = delete;
+
+private:
+    std::atomic<int> &mActiveCount;
+};
+
+constexpr double kLostUploadOverlapSec = 0.5;
 
 // [轨迹导出修改] 用于统一收集 Atlas 中的 KeyFrame 轨迹记录。
 struct TrajectoryRecord {
@@ -294,6 +358,7 @@ public:
     void SetOrbMapPublisher(ros::Publisher *pPublisher);
     void SetCloudImagesActionClient(CloudClient *pCloudImagesActionClient);
     void SetImageTopicPublisher(ros::Publisher *pPublisher);
+    void SetImageDelay(double imageDelay);
     // **********************************************
 
     // **********************************************
@@ -315,8 +380,13 @@ public:
     // Subscriber Callback: Read Cloud Map
     void GrabCloudMapCb(const cloud_edge_slam::CloudMapConstPtr &msg);
     void RawImageCb(const sensor_msgs::ImageConstPtr &msg);
-    void TrackingWatchdog(double timestamp, int num_landmarks);
-    void UploadLostImages(double start_time, double end_time);
+    void TrackingWatchdog(const MarginalizedData &data);
+    void UploadLostImages(LostUploadRequest request);
+    void BeginLostRecoveryUploadEvent(std::uint64_t generation);
+    bool PreparePendingLostRecoveryUpload(
+        std::uint64_t generation,
+        LostUploadBoundarySnapshot boundary);
+    bool FinalizePendingLostRecoveryUpload(std::uint64_t generation, bool commit);
     
 
     // **********************
@@ -336,7 +406,6 @@ public:
     }
 
 public:
-    cloud_edge_slam::CloudSlamGoal goal;
     ORB_SLAM3::System *mpSLAM;
 
     ros::NodeHandle *mpNodeHandler;
@@ -363,6 +432,17 @@ private:
     std::deque<int> inliers_window_;
     TrackingState current_state_ = TrackingState::NORMAL;
     double warning_start_time_ = 0.0;
+    std::mutex mLostRecoveryUploadMutex;
+    bool mbLostRecoveryUploadValid = false;
+    std::uint64_t mnLostRecoveryUploadGeneration = 0;
+    double mLostRecoveryUploadStartTime = 0.0;
+    double mLostRecoveryUploadEndTime = 0.0;
+    LostRecoveryUploadPendingState mLostRecoveryUploadState = LostRecoveryUploadPendingState::EMPTY;
+    std::shared_ptr<LostUploadLaunchGate> mpLostUploadLaunchGate;
+    std::atomic<int> mnDiagnosticCloudParsingActive{0};
+    std::atomic<int> mnDiagnosticJpegUploadActive{0};
+    double mImageDelay = 0.0;
+    std::mutex mUploadSendMutex;
 };
 
 
@@ -561,9 +641,21 @@ int main(int argc, char **argv) {
     Grabber igb(&SLAM);
 
     pSVIn2ORBWrapper->RegisterStateCallbacks(
-        std::bind(&Grabber::TrackingWatchdog, &igb, std::placeholders::_1, std::placeholders::_2),
+        std::bind(&Grabber::TrackingWatchdog, &igb, std::placeholders::_1),
         std::bind(&Grabber::GetTrackingState, &igb)
     );
+    pSVIn2ORBWrapper->RegisterLostTopologyCallbacks(
+        std::bind(&Grabber::BeginLostRecoveryUploadEvent, &igb, std::placeholders::_1),
+        std::bind(
+            &Grabber::PreparePendingLostRecoveryUpload,
+            &igb,
+            std::placeholders::_1,
+            std::placeholders::_2),
+        std::bind(
+            &Grabber::FinalizePendingLostRecoveryUpload,
+            &igb,
+            std::placeholders::_1,
+            std::placeholders::_2));
 
     igb.SetParameters(bWaitCloudResult, mainLoopSleep, full_path, bSaveCloudBag, bOldUdf, bNewUdf);//设置几个参数，如是否等待云端结果，每帧运行后睡眠时间，保存的路径
 
@@ -599,6 +691,7 @@ int main(int argc, char **argv) {
     okvis::RosParametersReader vio_parameters_reader(settingPath);
     okvis::VioParameters parameters;
     vio_parameters_reader.getParameters(parameters);
+    igb.SetImageDelay(parameters.sensors_information.imageDelay);
 
     okvis::ThreadedKFVio okvis_estimator(parameters);
     okvis::Publisher publisher(nh);
@@ -815,6 +908,20 @@ void Grabber::SetParameters(bool bWaitCloudResult, float nMainLoopSleep, string 
     mbNewUdf = bNewUdf;
 }
 
+void Grabber::SetImageDelay(const double imageDelay) {
+    if (std::isfinite(imageDelay)) {
+        mImageDelay = imageDelay;
+        std::cout << "[LostUpload] imageDelay="
+                  << mImageDelay
+                  << ", conversion=raw_image_time=frontend_time+imageDelay"
+                  << std::endl;
+    } else {
+        mImageDelay = 0.0;
+        std::cout << "[LostUpload][WARNING] imageDelay is non-finite; use 0.0, conversion=raw_image_time=frontend_time+imageDelay"
+                  << std::endl;
+    }
+}
+
 void Grabber::SetNodeHandle(ros::NodeHandle *pNodeHandle) {
     mpNodeHandler = pNodeHandle;
 }
@@ -901,12 +1008,17 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
                 msgs_buffer[i] = msg;
             }
         
-            goal.sequence = imageSeqMsg;
-            goal.total_image_count = total_imgs; 
-            mpCloudImagesActionClient->sendGoal(goal,
-                                                boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
-                                                CloudClient::SimpleActiveCallback(),
-                                                CloudClient::SimpleFeedbackCallback());
+            cloud_edge_slam::CloudSlamGoal localGoal;
+            localGoal.sequence = imageSeqMsg;
+            localGoal.total_image_count = total_imgs;
+            {
+                std::lock_guard<std::mutex> sendLock(mUploadSendMutex);
+                mpCloudImagesActionClient->sendGoal(
+                    localGoal,
+                    boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
+                    CloudClient::SimpleActiveCallback(),
+                    CloudClient::SimpleFeedbackCallback());
+            }
         
             ros::Duration(1.0).sleep(); 
             ROS_INFO("Start send %d images by Topic...", total_imgs);
@@ -1005,6 +1117,7 @@ inline bool exists_test (const std::string& name ) {
 // }
 
 void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, const cloud_edge_slam::CloudSlamResultConstPtr &result) {
+    RuntimePhaseDiagnosticScope cloudParsingScope(mnDiagnosticCloudParsingActive);
     if (state == actionlib::SimpleClientGoalState::SUCCEEDED) {
         if(this->mbNewUdf) {
             // ROS_INFO("[OUTER PROBE 0] mbNewUdf Triggered. Pre-clearing files.");
@@ -1109,6 +1222,7 @@ void Grabber::MemoryCb(const std_msgs::Float32ConstPtr &msg) {
 }
 
 void Grabber::GrabCloudMapCb(const cloud_edge_slam::CloudMapConstPtr &msg) {
+    RuntimePhaseDiagnosticScope cloudParsingScope(mnDiagnosticCloudParsingActive);
     ROS_ERROR_STREAM("Read Cloud Map Start!");
 
     ORB_SLAM3::Map *cloudMap = ROSMapToORBMap(msg);
@@ -1649,9 +1763,160 @@ void Grabber::RawImageCb(const sensor_msgs::ImageConstPtr &msg) {
     }
 }
 
-void Grabber::TrackingWatchdog(double timestamp, int num_landmarks) {
-    std::lock_guard<std::mutex> lock(mStateMutex);
-    
+void Grabber::BeginLostRecoveryUploadEvent(std::uint64_t generation) {
+    std::shared_ptr<LostUploadLaunchGate> previousGate;
+    {
+        std::lock_guard<std::mutex> lock(mLostRecoveryUploadMutex);
+        if (mLostRecoveryUploadState == LostRecoveryUploadPendingState::DISPATCHING) {
+            previousGate = mpLostUploadLaunchGate;
+        }
+        mbLostRecoveryUploadValid = false;
+        mnLostRecoveryUploadGeneration = generation;
+        mLostRecoveryUploadStartTime = 0.0;
+        mLostRecoveryUploadEndTime = 0.0;
+        mLostRecoveryUploadState = LostRecoveryUploadPendingState::AWAITING_RECOVERY;
+        mpLostUploadLaunchGate.reset();
+    }
+
+    if (previousGate != nullptr) {
+        {
+            std::lock_guard<std::mutex> gateLock(previousGate->mutex);
+            previousGate->decision = LostUploadLaunchDecision::CANCEL;
+        }
+        previousGate->condition.notify_all();
+    }
+}
+
+bool Grabber::PreparePendingLostRecoveryUpload(
+    const std::uint64_t generation,
+    const LostUploadBoundarySnapshot boundary) {
+    double startTime = 0.0;
+    double endTime = 0.0;
+    std::shared_ptr<LostUploadLaunchGate> launchGate(new LostUploadLaunchGate());
+    {
+        std::lock_guard<std::mutex> lock(mLostRecoveryUploadMutex);
+        if (!mbLostRecoveryUploadValid ||
+            mnLostRecoveryUploadGeneration != generation ||
+            mLostRecoveryUploadState != LostRecoveryUploadPendingState::AVAILABLE) {
+            return false;
+        }
+        startTime = mLostRecoveryUploadStartTime;
+        endTime = mLostRecoveryUploadEndTime;
+        mLostRecoveryUploadState = LostRecoveryUploadPendingState::DISPATCHING;
+        mpLostUploadLaunchGate = launchGate;
+    }
+
+    LostUploadRequest request;
+    request.generation = generation;
+    request.boundary_generation = boundary.generation;
+    request.original_start_frontend = startTime;
+    request.end_frontend = endTime;
+    request.image_delay = mImageDelay;
+    request.overlap_sec = kLostUploadOverlapSec;
+    request.committed_valid = false;
+    request.committed_frontend = 0.0;
+    request.candidate_mode = LostUploadStartMode::LEGACY_FALLBACK;
+    if (boundary.generation == generation && boundary.valid) {
+        request.committed_valid = true;
+        request.committed_frontend = boundary.frontend_timestamp;
+        request.candidate_mode = LostUploadStartMode::COMMITTED_BOUNDARY;
+    }
+
+    std::thread uploadThread;
+    try {
+        uploadThread = std::thread([this, request, launchGate]() {
+            std::unique_lock<std::mutex> gateLock(launchGate->mutex);
+            while (launchGate->decision == LostUploadLaunchDecision::PENDING) {
+                launchGate->condition.wait(gateLock);
+            }
+            const bool shouldRun = launchGate->decision == LostUploadLaunchDecision::RUN;
+            gateLock.unlock();
+            if (shouldRun) {
+                UploadLostImages(request);
+            }
+        });
+        uploadThread.detach();
+    } catch (const std::system_error &exception) {
+        {
+            std::lock_guard<std::mutex> gateLock(launchGate->mutex);
+            launchGate->decision = LostUploadLaunchDecision::CANCEL;
+        }
+        launchGate->condition.notify_all();
+        if (uploadThread.joinable()) {
+            uploadThread.join();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mLostRecoveryUploadMutex);
+            if (mnLostRecoveryUploadGeneration == generation &&
+                mLostRecoveryUploadState == LostRecoveryUploadPendingState::DISPATCHING &&
+                mpLostUploadLaunchGate == launchGate) {
+                mLostRecoveryUploadState = LostRecoveryUploadPendingState::AVAILABLE;
+                mpLostUploadLaunchGate.reset();
+            }
+        }
+
+        std::cout << "[LostUpload][ERROR] Failed to create or detach upload thread, generation="
+                  << generation
+                  << ", what="
+                  << exception.what()
+                  << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool Grabber::FinalizePendingLostRecoveryUpload(
+    const std::uint64_t generation,
+    const bool commit) {
+    std::shared_ptr<LostUploadLaunchGate> launchGate;
+    {
+        std::lock_guard<std::mutex> lock(mLostRecoveryUploadMutex);
+        if (mnLostRecoveryUploadGeneration != generation ||
+            mLostRecoveryUploadState != LostRecoveryUploadPendingState::DISPATCHING ||
+            mpLostUploadLaunchGate == nullptr) {
+            return false;
+        }
+
+        launchGate = mpLostUploadLaunchGate;
+        mpLostUploadLaunchGate.reset();
+        if (commit) {
+            mLostRecoveryUploadState = LostRecoveryUploadPendingState::CONSUMED;
+        } else {
+            mLostRecoveryUploadState = LostRecoveryUploadPendingState::AVAILABLE;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> gateLock(launchGate->mutex);
+        if (commit) {
+            launchGate->decision = LostUploadLaunchDecision::RUN;
+        } else {
+            launchGate->decision = LostUploadLaunchDecision::CANCEL;
+        }
+    }
+    launchGate->condition.notify_all();
+    return true;
+}
+
+void Grabber::TrackingWatchdog(const MarginalizedData &data) {
+    const double timestamp = data.timestamp;
+    const int num_landmarks = static_cast<int>(data.num_landmarks);
+    bool bQueueRecoveryUpload = false;
+    double recoveryStartTime = 0.0;
+    double recoveryEndTime = 0.0;
+    size_t windowBefore = 0;
+    size_t windowAfter = 0;
+    int avgInliers = 0;
+    TrackingState previousState = TrackingState::NORMAL;
+    TrackingState newState = TrackingState::NORMAL;
+    std::string transitionReason = "NONE";
+    double warningElapsedDataSec = 0.0;
+    std::unique_lock<std::mutex> lock(mStateMutex);
+
+    windowBefore = inliers_window_.size();
+    previousState = current_state_;
     inliers_window_.push_back(num_landmarks);
     if (inliers_window_.size() > 5) {
         inliers_window_.pop_front();
@@ -1662,6 +1927,8 @@ void Grabber::TrackingWatchdog(double timestamp, int num_landmarks) {
         sum = sum + inliers_window_[i];
     }
     int avg_inliers = sum / inliers_window_.size();
+    avgInliers = avg_inliers;
+    windowAfter = inliers_window_.size();
 
     static double last_dash_time = 0.0;
     if (timestamp - last_dash_time > 0.5) { 
@@ -1691,20 +1958,24 @@ if (current_state_ == TrackingState::NORMAL) {
         if (avg_inliers < WARNING_THRESHOLD) {
             current_state_ = TrackingState::WARNING;
             warning_start_time_ = timestamp; 
+            transitionReason = "NORMAL_TO_WARNING_LOW_AVG";
             ROS_WARN("Tracking Degrading! Entering WARNING state.");
         }
     } else if (current_state_ == TrackingState::WARNING) {
         if (avg_inliers >= RECOVER_THRESHOLD) {
             current_state_ = TrackingState::NORMAL;
+            transitionReason = "WARNING_TO_NORMAL_RECOVERED";
             ROS_INFO("Tracking Recovered from WARNING to NORMAL.");
         } else {
             bool trigger_lost = false;
             
             if (avg_inliers < LOST_THRESHOLD) {
                 trigger_lost = true;
+                transitionReason = "WARNING_TO_LOST_LOW_AVG";
                 ROS_ERROR("Tracking LOST! Reason: Inliers dropped below physical threshold.");
             } else if ((timestamp - warning_start_time_) > MAX_WARNING_DURATION) {
                 trigger_lost = true;
+                transitionReason = "WARNING_TO_LOST_DATA_TIMEOUT";
                 ROS_ERROR("Tracking LOST! Reason: WARNING state timeout .");
             }
 
@@ -1717,13 +1988,146 @@ if (current_state_ == TrackingState::NORMAL) {
     } else if (current_state_ == TrackingState::LOST) {
         if (avg_inliers >= RECOVER_THRESHOLD) {
             current_state_ = TrackingState::NORMAL;
+            transitionReason = "LOST_TO_NORMAL_RECOVERED";
             double lost_end_time = timestamp;
             
             // 只有当边缘端物理上驶出盲区，且新子图彻底建立后，才触发云端求救！
             ROS_INFO("Tracking Recovered! New submap established. Triggering Cloud Recovery.");
             
             // 此时打包的图像序列完美覆盖：旧图截断 -> 盲区穿越 -> 新图建立的全过程
-            std::thread(&Grabber::UploadLostImages, this, warning_start_time_, lost_end_time).detach();
+            bQueueRecoveryUpload = true;
+            recoveryStartTime = warning_start_time_;
+            recoveryEndTime = lost_end_time;
+        }
+    }
+
+    newState = current_state_;
+    if (previousState == TrackingState::WARNING || newState == TrackingState::WARNING) {
+        warningElapsedDataSec = timestamp - warning_start_time_;
+    }
+
+    lock.unlock();
+
+    const bool stateChanged = previousState != newState;
+    bool emitDebug = false;
+    if (num_landmarks < 90) {
+        emitDebug = true;
+    }
+    if (data.diagnostic_wall_gap_available && data.diagnostic_wall_gap_ms > 100.0) {
+        emitDebug = true;
+    }
+    if (data.diagnostic_frontend_gap_available &&
+        (data.diagnostic_frontend_timestamp_gap_ms > 100.0 ||
+         data.diagnostic_frontend_timestamp_gap_ms < 0.0)) {
+        emitDebug = true;
+    }
+    if (!data.diagnostic_frontend_gap_available && data.diagnostic_sequence_id > 1) {
+        emitDebug = true;
+    }
+    if (stateChanged) {
+        emitDebug = true;
+    }
+
+    auto trackingStateToString = [](TrackingState trackingState) {
+        if (trackingState == TrackingState::NORMAL) {
+            return std::string("NORMAL");
+        }
+        if (trackingState == TrackingState::WARNING) {
+            return std::string("WARNING");
+        }
+        return std::string("LOST");
+    };
+
+    if (emitDebug && !data.diagnostic_log_emitted_by_estimator) {
+        std::cout << std::fixed << std::setprecision(9)
+                  << "[MarginalizedFrameDebug] sequence_id="
+                  << data.diagnostic_sequence_id
+                  << ", frontend_timestamp="
+                  << data.timestamp
+                  << ", num_landmarks="
+                  << data.num_landmarks
+                  << ", wall_timestamp="
+                  << data.diagnostic_wall_timestamp
+                  << ", wall_gap_ms=";
+        if (data.diagnostic_wall_gap_available) {
+            std::cout << data.diagnostic_wall_gap_ms;
+        } else {
+            std::cout << "not_available";
+        }
+        std::cout << ", frontend_timestamp_gap_ms=";
+        if (data.diagnostic_frontend_gap_available) {
+            std::cout << data.diagnostic_frontend_timestamp_gap_ms;
+        } else {
+            std::cout << "not_available";
+        }
+        std::cout << ", thread_id="
+                  << std::this_thread::get_id()
+                  << std::endl;
+    }
+
+    if (emitDebug) {
+        std::cout << std::fixed << std::setprecision(9)
+                  << "[WatchdogInputDebug] sequence_id="
+                  << data.diagnostic_sequence_id
+                  << ", frontend_timestamp="
+                  << data.timestamp
+                  << ", num_landmarks="
+                  << data.num_landmarks
+                  << ", window_before="
+                  << windowBefore
+                  << ", window_after="
+                  << windowAfter
+                  << ", avg_inliers="
+                  << avgInliers
+                  << ", previous_state="
+                  << trackingStateToString(previousState)
+                  << ", new_state="
+                  << trackingStateToString(newState)
+                  << ", transition_reason="
+                  << transitionReason
+                  << ", warning_elapsed_data_sec="
+                  << warningElapsedDataSec
+                  << std::endl;
+
+        std::string runtimePhase = "IDLE";
+        if (mpSLAM != nullptr) {
+            const ORB_SLAM3::BackendWriteState backendState = mpSLAM->GetBackendWriteState();
+            if (backendState == ORB_SLAM3::BackendWriteState::MERGING) {
+                runtimePhase = "MERGING";
+            } else if (backendState == ORB_SLAM3::BackendWriteState::REPLAYING) {
+                runtimePhase = "REPLAYING";
+            }
+        }
+        if (runtimePhase == "IDLE") {
+            if (mnDiagnosticCloudParsingActive.load(std::memory_order_acquire) > 0) {
+                runtimePhase = "CLOUD_PARSING";
+            }
+        }
+        if (runtimePhase == "IDLE") {
+            if (mnDiagnosticJpegUploadActive.load(std::memory_order_acquire) > 0) {
+                runtimePhase = "JPEG_UPLOAD";
+            }
+        }
+        std::cout << std::fixed << std::setprecision(9)
+                  << "[RuntimePhaseDebug] frontend_timestamp="
+                  << data.timestamp
+                  << ", phase="
+                  << runtimePhase
+                  << ", num_landmarks="
+                  << data.num_landmarks
+                  << ", avg_inliers="
+                  << avgInliers
+                  << std::endl;
+    }
+
+    if (bQueueRecoveryUpload) {
+        std::lock_guard<std::mutex> recoveryLock(mLostRecoveryUploadMutex);
+        if (mnLostRecoveryUploadGeneration != 0 &&
+            mLostRecoveryUploadState == LostRecoveryUploadPendingState::AWAITING_RECOVERY) {
+            mbLostRecoveryUploadValid = true;
+            mLostRecoveryUploadStartTime = recoveryStartTime;
+            mLostRecoveryUploadEndTime = recoveryEndTime;
+            mLostRecoveryUploadState = LostRecoveryUploadPendingState::AVAILABLE;
         }
     }
 }
@@ -1845,7 +2249,8 @@ if (current_state_ == TrackingState::NORMAL) {
 // }
 
 
-void Grabber::UploadLostImages(double start_time, double end_time) {
+void Grabber::UploadLostImages(LostUploadRequest request) {
+    RuntimePhaseDiagnosticScope jpegUploadScope(mnDiagnosticJpegUploadActive);
     std::vector<ORB_SLAM3::CloudImage> vCurrentProcessCloudImages;
     
     // 1. 正确提取历史子图 ID
@@ -1863,38 +2268,179 @@ void Grabber::UploadLostImages(double start_time, double end_time) {
         edgeBackMapId = edgeFrontMapId + 1;
     }
 
-    // ==========================================================
-    // 【架构优化】：将地图查询（内部含地图锁）移出图像池锁的范围，防止 AB-BA 死锁
-    // ==========================================================
-    double adjusted_start_time = start_time;
-    if (pFrontMap != nullptr) {
-        std::vector<ORB_SLAM3::KeyFrame*> vpKFs = pFrontMap->GetAllKeyFrames();
-        double last_kf_ts = 0.0;
-        for (auto pKF : vpKFs) {
-            if (pKF) {
-                if (!pKF->isBad()) {
-                    if (pKF->mTimeStamp > last_kf_ts) {
-                        last_kf_ts = pKF->mTimeStamp;
+    auto resolveLegacyStartFrontend = [&]() {
+        double legacyStartFrontend = request.original_start_frontend;
+        if (pFrontMap != nullptr) {
+            std::vector<ORB_SLAM3::KeyFrame*> vpKFs = pFrontMap->GetAllKeyFrames();
+            double lastKeyFrameTimestamp = 0.0;
+            for (size_t i = 0; i < vpKFs.size(); ++i) {
+                ORB_SLAM3::KeyFrame *pKF = vpKFs[i];
+                if (pKF != nullptr) {
+                    if (!pKF->isBad()) {
+                        if (pKF->mTimeStamp > lastKeyFrameTimestamp) {
+                            lastKeyFrameTimestamp = pKF->mTimeStamp;
+                        }
                     }
                 }
             }
+            if (lastKeyFrameTimestamp > 0.1 &&
+                lastKeyFrameTimestamp < legacyStartFrontend) {
+                ROS_INFO("\033[1;33m[Time Sync] Auto-shifting cloud start frontend time to %.3f to match EdgeFrontMap.\033[0m", lastKeyFrameTimestamp);
+                legacyStartFrontend = lastKeyFrameTimestamp;
+            }
         }
-        // 如果最后一帧时间确实早于 warning，且不是异常值，则左移起始时间
-        if (last_kf_ts > 0.1 && last_kf_ts < adjusted_start_time) {
-            ROS_INFO("\033[1;33m[Time Sync] Auto-shifting cloud start time to %.3f to match EdgeFrontMap.\033[0m", last_kf_ts);
-            adjusted_start_time = last_kf_ts;
-        }
-    }
+        return legacyStartFrontend;
+    };
 
-    // ==========================================================
-    // 2. 仅在物理提取图像时加锁，保证图像池内存安全
-    // ==========================================================
+    double cacheFirst = 0.0;
+    double cacheLast = 0.0;
     {
         std::lock_guard<std::mutex> lock(mBufMutex);
-        
-        auto it_start = mImageBuffer.lower_bound(adjusted_start_time - 0.05); 
-        auto it_end = mImageBuffer.upper_bound(end_time + 0.05);
-        
+        if (mImageBuffer.empty()) {
+            std::cout << "[LostUpload] Resolve upload range, generation="
+                      << request.generation
+                      << ", mode=LEGACY_FALLBACK, result=no_image_cache"
+                      << std::endl;
+            return;
+        }
+        cacheFirst = mImageBuffer.begin()->first;
+        cacheLast = mImageBuffer.rbegin()->first;
+    }
+
+    LostUploadStartMode actualMode = LostUploadStartMode::LEGACY_FALLBACK;
+    std::string result = "fallback_invalid_timestamp";
+    bool requestedStartAvailable = false;
+    double requestedStartRaw = 0.0;
+    double resolvedStartRaw = 0.0;
+    double resolvedEndRaw = 0.0;
+
+    const bool generationMatches = request.boundary_generation == request.generation;
+    const bool commonTimestampsFinite =
+        std::isfinite(request.end_frontend) && std::isfinite(request.image_delay);
+    const bool committedCandidateFinite =
+        request.committed_valid && std::isfinite(request.committed_frontend);
+
+    if (request.candidate_mode == LostUploadStartMode::COMMITTED_BOUNDARY &&
+        generationMatches && commonTimestampsFinite && committedCandidateFinite) {
+        requestedStartRaw = request.committed_frontend + request.image_delay - request.overlap_sec;
+        resolvedEndRaw = request.end_frontend + request.image_delay;
+        requestedStartAvailable = std::isfinite(requestedStartRaw);
+        if (requestedStartAvailable && std::isfinite(resolvedEndRaw) &&
+            resolvedEndRaw >= requestedStartRaw) {
+            if (requestedStartRaw <= cacheLast) {
+                actualMode = LostUploadStartMode::COMMITTED_BOUNDARY;
+                resolvedStartRaw = requestedStartRaw;
+                result = "success";
+                if (resolvedStartRaw < cacheFirst) {
+                    const double missingDuration = cacheFirst - resolvedStartRaw;
+                    resolvedStartRaw = cacheFirst;
+                    result = "clamped_to_cache_first";
+                    std::cout << "[LostUpload][WARNING] Clamp committed upload start to cache first, generation="
+                              << request.generation
+                              << ", requested_start_raw="
+                              << requestedStartRaw
+                              << ", cache_first="
+                              << cacheFirst
+                              << ", missing_duration="
+                              << missingDuration
+                              << std::endl;
+                }
+            } else {
+                result = "fallback_committed_after_cache";
+            }
+        }
+    } else if (!generationMatches) {
+        result = "fallback_generation_mismatch";
+    }
+
+    if (actualMode == LostUploadStartMode::LEGACY_FALLBACK) {
+        const double legacyStartFrontend = resolveLegacyStartFrontend();
+        resolvedStartRaw = legacyStartFrontend + request.image_delay;
+        resolvedEndRaw = request.end_frontend + request.image_delay;
+    }
+
+    const bool resolvedRangeValid =
+        std::isfinite(resolvedStartRaw) &&
+        std::isfinite(resolvedEndRaw) &&
+        resolvedEndRaw >= resolvedStartRaw;
+    if (!resolvedRangeValid) {
+        std::cout << "[LostUpload] Resolve upload range, generation="
+                  << request.generation
+                  << ", mode=LEGACY_FALLBACK, original_start_frontend="
+                  << request.original_start_frontend
+                  << ", end_frontend="
+                  << request.end_frontend
+                  << ", image_delay="
+                  << request.image_delay
+                  << ", overlap_sec="
+                  << request.overlap_sec
+                  << ", cache_first="
+                  << cacheFirst
+                  << ", cache_last="
+                  << cacheLast
+                  << ", result=invalid_range"
+                  << std::endl;
+        return;
+    }
+
+    std::string modeName = "LEGACY_FALLBACK";
+    if (actualMode == LostUploadStartMode::COMMITTED_BOUNDARY) {
+        modeName = "COMMITTED_BOUNDARY";
+    }
+
+    std::cout << "[LostUpload] Resolve upload range, generation="
+              << request.generation
+              << ", mode="
+              << modeName
+              << ", original_start_frontend="
+              << request.original_start_frontend
+              << ", end_frontend="
+              << request.end_frontend
+              << ", committed_valid=";
+    if (request.committed_valid) {
+        std::cout << "true, committed_frontend=" << request.committed_frontend;
+    } else {
+        std::cout << "false, committed_frontend=not_available";
+    }
+    std::cout << ", image_delay="
+              << request.image_delay
+              << ", overlap_sec="
+              << request.overlap_sec
+              << ", requested_start_raw=";
+    if (requestedStartAvailable) {
+        std::cout << requestedStartRaw;
+    } else {
+        std::cout << "not_available";
+    }
+    std::cout << ", resolved_start_raw="
+              << resolvedStartRaw
+              << ", resolved_end_raw="
+              << resolvedEndRaw
+              << ", cache_first="
+              << cacheFirst
+              << ", cache_last="
+              << cacheLast
+              << ", result="
+              << result
+              << std::endl;
+
+    {
+        std::lock_guard<std::mutex> lock(mBufMutex);
+        if (mImageBuffer.empty()) {
+            std::cout << "[LostUpload][WARNING] Image cache became empty before snapshot, generation="
+                      << request.generation
+                      << std::endl;
+            return;
+        }
+
+        if (actualMode == LostUploadStartMode::COMMITTED_BOUNDARY &&
+            resolvedStartRaw < mImageBuffer.begin()->first) {
+            resolvedStartRaw = mImageBuffer.begin()->first;
+        }
+
+        auto it_start = mImageBuffer.lower_bound(resolvedStartRaw - 0.05);
+        auto it_end = mImageBuffer.upper_bound(resolvedEndRaw + 0.05);
+
         double last_extracted_time = -1.0;
         
         // 【30Hz 满帧输出配置】
@@ -1903,9 +2449,9 @@ void Grabber::UploadLostImages(double start_time, double end_time) {
 
         // 【物理锚点硬绑定】
         // 保证云端 DROID-SLAM 重建的起点与前段地图时间的数学绝对一致性
-        auto exact_it = mImageBuffer.lower_bound(adjusted_start_time - 0.005);
+        auto exact_it = mImageBuffer.lower_bound(resolvedStartRaw - 0.005);
         if (exact_it != mImageBuffer.end()) {
-            if (std::abs(exact_it->first - adjusted_start_time) < 0.01) {
+            if (std::abs(exact_it->first - resolvedStartRaw) < 0.01) {
                 ORB_SLAM3::CloudImage ci(exact_it->second.clone(), exact_it->first, "RGB");
                 vCurrentProcessCloudImages.push_back(ci);
                 last_extracted_time = exact_it->first; 
@@ -1925,6 +2471,18 @@ void Grabber::UploadLostImages(double start_time, double end_time) {
             ORB_SLAM3::CloudImage ci(it->second.clone(), it->first, "RGB");
             vCurrentProcessCloudImages.push_back(ci);
         }
+    }
+
+    if (!vCurrentProcessCloudImages.empty()) {
+        std::cout << "[LostUpload] Image snapshot ready, generation="
+                  << request.generation
+                  << ", selected_images="
+                  << vCurrentProcessCloudImages.size()
+                  << ", first_selected_time="
+                  << vCurrentProcessCloudImages.front().timestamp
+                  << ", last_selected_time="
+                  << vCurrentProcessCloudImages.back().timestamp
+                  << std::endl;
     }
     
     if (vCurrentProcessCloudImages.empty()) {
@@ -1964,12 +2522,17 @@ void Grabber::UploadLostImages(double start_time, double end_time) {
             msgs_buffer[i] = msg;
         }
     
-        goal.sequence = imageSeqMsg;
-        goal.total_image_count = total_imgs; 
-        mpCloudImagesActionClient->sendGoal(goal,
-                                            boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
-                                            CloudClient::SimpleActiveCallback(),
-                                            CloudClient::SimpleFeedbackCallback());
+        cloud_edge_slam::CloudSlamGoal localGoal;
+        localGoal.sequence = imageSeqMsg;
+        localGoal.total_image_count = total_imgs;
+        {
+            std::lock_guard<std::mutex> sendLock(mUploadSendMutex);
+            mpCloudImagesActionClient->sendGoal(
+                localGoal,
+                boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
+                CloudClient::SimpleActiveCallback(),
+                CloudClient::SimpleFeedbackCallback());
+        }
     
         ros::Duration(1.0).sleep(); 
         ros::Rate burst_rate(100.0); 

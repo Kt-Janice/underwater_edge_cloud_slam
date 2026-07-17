@@ -26,6 +26,7 @@ class KeyFrameDatabase;
 class Map;
 class MapDrawer;
 class FrameDrawer;
+class System;
 
 class CloudMerging {
 public:
@@ -36,6 +37,7 @@ public:
 
 public:
     CloudMerging(
+        System *pSystem,
         Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC,
         const bool bWork, const bool bMergeAnyway,       // for parameters
         MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer, // for debug
@@ -144,6 +146,7 @@ protected:
 
     Atlas *mpAtlas;
     Tracking *mpTracker;
+    System *mpSystem;
 
     KeyFrameDatabase *mpKeyFrameDB;
     ORBVocabulary *mpORBVocabulary;

@@ -43,6 +43,8 @@
 #ifndef INCLUDE_OKVIS_FRAMESYNCHRONIZER_HPP_
 #define INCLUDE_OKVIS_FRAMESYNCHRONIZER_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <okvis/Measurements.hpp>
 #include <okvis/MultiFrame.hpp>
@@ -107,6 +109,9 @@ class FrameSynchronizer {
    */
   bool detectionCompletedForAllCameras(uint64_t multiFrameId);
 
+  // [前端负载诊断] 未完成 multiframe 被环形缓冲覆盖的累计次数，只读查询。
+  std::uint64_t GetDroppedIncompleteFrameCount() const;
+
  private:
   /**
    * @brief Find a multiframe in the buffer that has a timestamp within the tolerances of the given one. The tolerance
@@ -143,6 +148,8 @@ class FrameSynchronizer {
   okvis::Time lastCompletedFrameTimestamp_;
   /// ID of the last multiframe that returned true in detectionCompletedForAllCameras().
   uint64_t lastCompletedFrameId_;
+  std::shared_ptr<std::atomic<std::uint64_t>> mpDroppedIncompleteFrameCount_ =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
 };
 
 } /* namespace okvis */

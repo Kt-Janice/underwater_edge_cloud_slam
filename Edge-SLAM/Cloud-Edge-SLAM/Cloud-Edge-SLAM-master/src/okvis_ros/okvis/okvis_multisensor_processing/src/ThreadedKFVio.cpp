@@ -41,6 +41,8 @@
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
@@ -104,6 +106,67 @@ static const int max_camera_input_queue_size = 10;
 static const okvis::Duration temporal_imu_data_overlap(
     0.02);  // overlap of imu data before and after two consecutive frames [seconds]
 okvis::Duration temporal_relo_data_overlap(0.2);
+
+void ThreadedKFVio::MaybeLogQueueDebug(const okvis::Time& frontendTimestamp, bool forceLog) {
+  size_t imageQueueSize = 0;
+  for (size_t cameraIndex = 0; cameraIndex < cameraMeasurementsReceived_.size(); ++cameraIndex) {
+    const size_t cameraQueueSize = cameraMeasurementsReceived_[cameraIndex]->Size();
+    if (cameraQueueSize > imageQueueSize) {
+      imageQueueSize = cameraQueueSize;
+    }
+  }
+  const size_t imuQueueSize = imuMeasurementsReceived_.Size();
+  const size_t optimizationQueueSize = matchedFrames_.Size();
+  const std::uint64_t frameSynchronizerDropTotal = frameSynchronizer_.GetDroppedIncompleteFrameCount();
+
+  bool nearLimit = false;
+  if (imageQueueSize >= static_cast<size_t>(max_camera_input_queue_size - 2)) {
+    nearLimit = true;
+  }
+  if (maxImuInputQueueSize_ > 0 && imuQueueSize * 5 >= maxImuInputQueueSize_ * 4) {
+    nearLimit = true;
+  }
+  if (optimizationQueueSize >= 1) {
+    nearLimit = true;
+  }
+
+  if (!forceLog && !nearLimit) {
+    return;
+  }
+
+  const std::uint64_t eventCount = mnQueueDebugEventCount_.fetch_add(1) + 1;
+  if (eventCount > 5 && eventCount % 30 != 0) {
+    return;
+  }
+
+  std::cout << "[OkvisQueueDebug] frontend_timestamp="
+            << frontendTimestamp.toSec()
+            << ", image_queue_size="
+            << imageQueueSize
+            << ", imu_queue_size="
+            << imuQueueSize
+            << ", optimization_queue_size="
+            << optimizationQueueSize
+            << ", image_drop_total="
+            << mnImageDropTotal_.load()
+            << ", imu_drop_total="
+            << mnImuDropTotal_.load()
+            << ", frame_skip_total="
+            << mnFrameSkipTotal_.load() + frameSynchronizerDropTotal
+            << ", frame_synchronizer_drop_total="
+            << frameSynchronizerDropTotal
+            << ", image_queue_limit_per_camera="
+            << max_camera_input_queue_size
+            << ", imu_queue_limit="
+            << maxImuInputQueueSize_
+            << ", optimization_queue_limit=1"
+            << std::endl;
+}
+
+void ThreadedKFVio::RecordFrameSkipForDebug(const okvis::Time& frontendTimestamp) {
+  mnFrameSkipTotal_.fetch_add(1);
+  MaybeLogQueueDebug(frontendTimestamp, true);
+}
 
 #ifdef USE_MOCK
 // Constructor for gmock.
@@ -292,6 +355,7 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
   if (lastAddedImageTimestamp_ > stamp &&
       fabs((lastAddedImageTimestamp_ - stamp).toSec()) > parameters_.sensors_information.frameTimestampTolerance) {
     LOG(ERROR) << "Received image from the past. Dropping the image.";
+    RecordFrameSkipForDebug(stamp);
     return false;
   }
   lastAddedImageTimestamp_ = stamp;
@@ -312,7 +376,15 @@ bool ThreadedKFVio::addImage(const okvis::Time& stamp,
     cameraMeasurementsReceived_[cameraIndex]->PushBlockingIfFull(frame, 1);
     return true;
   } else {
-    cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size);
+    const bool droppedOldestImage =
+        cameraMeasurementsReceived_[cameraIndex]->PushNonBlockingDroppingIfFull(frame, max_camera_input_queue_size);
+    if (droppedOldestImage) {
+      mnImageDropTotal_.fetch_add(1);
+      RecordFrameSkipForDebug(stamp);
+    }
+    if (!droppedOldestImage) {
+      MaybeLogQueueDebug(stamp, false);
+    }
     return cameraMeasurementsReceived_[cameraIndex]->Size() == 1;
   }
 }
@@ -405,7 +477,12 @@ bool ThreadedKFVio::addImuMeasurement(const okvis::Time& stamp,
     imuMeasurementsReceived_.PushBlockingIfFull(imu_measurement, 1);
     return true;
   } else {
-    imuMeasurementsReceived_.PushNonBlockingDroppingIfFull(imu_measurement, maxImuInputQueueSize_);
+    const bool droppedOldestImu =
+        imuMeasurementsReceived_.PushNonBlockingDroppingIfFull(imu_measurement, maxImuInputQueueSize_);
+    if (droppedOldestImu) {
+      mnImuDropTotal_.fetch_add(1);
+    }
+    MaybeLogQueueDebug(stamp, droppedOldestImu);
     return imuMeasurementsReceived_.Size() == 1;
   }
 }
@@ -489,15 +566,23 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       return;
     }
     beforeDetectTimer.start();
+    bool frameSynchronizerDroppedFrame = false;
     {  // lock the frame synchronizer
       waitForFrameSynchronizerMutexTimer.start();
       std::lock_guard<std::mutex> lock(frameSynchronizer_mutex_);
       waitForFrameSynchronizerMutexTimer.stop();
       // add new frame to frame synchronizer and get the MultiFrame containing it
       addNewFrameToSynchronizerTimer.start();
+      const std::uint64_t frameSynchronizerDropCountBefore =
+          frameSynchronizer_.GetDroppedIncompleteFrameCount();
       multiFrame = frameSynchronizer_.addNewFrame(frame);
+      frameSynchronizerDroppedFrame =
+          frameSynchronizer_.GetDroppedIncompleteFrameCount() > frameSynchronizerDropCountBefore;
       addNewFrameToSynchronizerTimer.stop();
     }  // unlock frameSynchronizer only now as we can be sure that not two states are added for the same timestamp
+    if (frameSynchronizerDroppedFrame) {
+      MaybeLogQueueDebug(multiFrame->timestamp(), true);
+    }
     okvis::kinematics::Transformation T_WS;
     okvis::Time lastTimestamp;
     okvis::SpeedAndBias speedAndBiases;
@@ -631,12 +716,14 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       // no measurements in timeframe, should not happen, as we waited for measurements
       if (depthData.size() == 0) {
         beforeDetectTimer.stop();
+        RecordFrameSkipForDebug(multiFrame->timestamp());
         continue;
       }
 
       if (depthData.front().timeStamp > frame->timeStamp) {
         LOG(WARNING) << "Frame is newer than oldest Depth measurement. Dropping it.";
         beforeDetectTimer.stop();
+        RecordFrameSkipForDebug(multiFrame->timestamp());
         continue;
       }
     }
@@ -663,12 +750,14 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       // no measurements in timeframe, should not happen, as we waited for measurements
       if (sonarData.size() == 0) {
         beforeDetectTimer.stop();
+        RecordFrameSkipForDebug(multiFrame->timestamp());
         continue;
       }
 
       if (sonarData.front().timeStamp > frame->timeStamp) {
         LOG(WARNING) << "Frame is newer than oldest Sonar measurement. Dropping it.";
         beforeDetectTimer.stop();
+        RecordFrameSkipForDebug(multiFrame->timestamp());
         continue;
       }
 
@@ -719,12 +808,14 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
     // no measurements in timeframe, should not happen, as we waited for measurements
     if (imuData.size() == 0) {
       beforeDetectTimer.stop();
+      RecordFrameSkipForDebug(multiFrame->timestamp());
       continue;
     }
 
     if (imuData.front().timeStamp > frame->timeStamp) {
       LOG(WARNING) << "Frame is newer than oldest IMU measurement. Dropping it.";
       beforeDetectTimer.stop();
+      RecordFrameSkipForDebug(multiFrame->timestamp());
       continue;
     }
 
@@ -742,6 +833,7 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       OKVIS_ASSERT_TRUE_DBG(Exception, success, "pose could not be initialized from imu measurements.");
       if (!success) {
         beforeDetectTimer.stop();
+        RecordFrameSkipForDebug(multiFrame->timestamp());
         continue;
       }
     } else {
@@ -837,7 +929,10 @@ void ThreadedKFVio::matchingLoop() {
     prepareToAddStateTimer.stop();
     // if imu_data is empty, either end_time > begin_time or
     // no measurements in timeframe, should not happen, as we waited for measurements
-    if (imuData.size() == 0) continue;
+    if (imuData.size() == 0) {
+      RecordFrameSkipForDebug(frame->timestamp());
+      continue;
+    }
 
     // @Sharmin
     // Sonar Data
@@ -863,7 +958,10 @@ void ThreadedKFVio::matchingLoop() {
 
       // if sonar_data is empty, either end_time > begin_time or
       // no measurements in timeframe, should not happen, as we waited for measurements
-      if (sonarData.size() == 0) continue;
+      if (sonarData.size() == 0) {
+        RecordFrameSkipForDebug(frame->timestamp());
+        continue;
+      }
     }
     // Depth data
     okvis::DepthMeasurementDeque depthData;
@@ -890,6 +988,7 @@ void ThreadedKFVio::matchingLoop() {
       // no measurements in timeframe, should not happen, as we waited for measurements
       if (depthData.size() == 0) {
         LOG(WARNING) << "NO DEPTH DATA!!!";
+        RecordFrameSkipForDebug(frame->timestamp());
         continue;
       }
     }
@@ -914,6 +1013,7 @@ void ThreadedKFVio::matchingLoop() {
       } else {
         LOG(ERROR) << "Failed to add state! will drop multiframe.";
         addStateTimer.stop();
+        RecordFrameSkipForDebug(frame->timestamp());
         continue;
       }
 
@@ -1505,7 +1605,7 @@ void ThreadedKFVio::optimizationLoop() {
                 lastOptimized_T_WS_ * (*parameters_.nCameraSystem.T_SC(CamIndexA));
             keyframeCallback_(lastOptimizedStateTimestamp_, image_l, T_WCa, kf_points);
 
-            std::cout << "Keyframe Index: " << kf_index_ << std::endl;
+            // std::cout << "Keyframe Index: " << kf_index_ << std::endl;
             kf_index_++;
           }
         }
