@@ -32,6 +32,19 @@ class MapDrawer;
 class FrameDrawer;
 class System;
 
+enum class CloudMapCleanupAction {
+    NONE,
+    DELETE_CLOUD_MAP,
+    PRESERVE_FOR_ATLAS,
+    PRESERVE_AFTER_PARTIAL_CORRECTION
+};
+
+struct CloudMergeExecutionResult {
+    CloudMergeOutcome outcome = CloudMergeOutcome::FAILED_EXCEPTION;
+    std::string detail;
+    CloudMapCleanupAction cleanupAction = CloudMapCleanupAction::NONE;
+};
+
 class CloudMerging {
 public:
     typedef pair<set<KeyFrame *>, int> ConsistentGroup;
@@ -187,6 +200,12 @@ protected:
     std::uint64_t mnNextCloudMergeSequence = 0;
     bool mbSlaShutdownRequested = false;
     RuntimeEnvironment mRuntimeEnvironment = RuntimeEnvironment::LAND;
+
+    CloudMergeExecutionResult RunSeaCloudMerge(PendingCloudMap &pending);
+    CloudMergeExecutionResult RunLandAirCloudMerge(PendingCloudMap &pending);
+    void ApplyCloudMapCleanup(
+        PendingCloudMap &pending,
+        CloudMapCleanupAction cleanupAction);
 
     // Start Cloud variables
     Map *mpCurrentCloudMap;
