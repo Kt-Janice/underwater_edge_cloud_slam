@@ -1,7 +1,11 @@
 #include "CloudMerging.h"
+#include "Map.h"
+#include "MapDrawer.h"
 
 #include <unistd.h>
 
+#include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace ORB_SLAM3 {
@@ -300,8 +304,249 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         return result;
     }
 
-    result.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
-    result.detail = "land/air strategy has not been migrated";
+    mpCurrentCloudMap = pending.pMap;
+    mpCurrentEdgeFrontMap = mpAtlas->GetSpecifyMap(
+        mpCurrentCloudMap->edgeFrontMapMnId);
+    mpCurrentEdgeBackMap = mpAtlas->GetSpecifyMap(
+        mpCurrentCloudMap->edgeBackMapMnId);
+    if (mpCurrentEdgeFrontMap == nullptr || mpCurrentEdgeBackMap == nullptr) {
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_EDGE_MAP_MISSING;
+        result.detail = "referenced edge map is unavailable";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    const double timestampTolerance = 0.05;
+    const std::vector<KeyFrame *> &edgeFrontKeyFrames =
+        mpCurrentEdgeFrontMap->GetAllKeyFrames();
+    const std::vector<KeyFrame *> &cloudKeyFrames =
+        mpCurrentCloudMap->GetAllKeyFrames();
+    std::vector<bool> cloudKeyFrameMatched(cloudKeyFrames.size(), false);
+    mpEdgeFrontCloudKeyFrameMatch.clear();
+
+    for (size_t edgeFrontIndex = 0;
+         edgeFrontIndex < edgeFrontKeyFrames.size();
+         edgeFrontIndex++) {
+        KeyFrame *edgeFrontKeyFrame = edgeFrontKeyFrames[edgeFrontIndex];
+        if (edgeFrontKeyFrame == nullptr) {
+            continue;
+        }
+
+        double bestTimestampDelta = timestampTolerance;
+        int bestCloudIndex = -1;
+        for (size_t cloudIndex = 0;
+             cloudIndex < cloudKeyFrames.size();
+             cloudIndex++) {
+            if (cloudKeyFrameMatched[cloudIndex]) {
+                continue;
+            }
+            KeyFrame *cloudKeyFrame = cloudKeyFrames[cloudIndex];
+            if (cloudKeyFrame == nullptr) {
+                continue;
+            }
+
+            const double timestampDelta = std::abs(
+                edgeFrontKeyFrame->mTimeStamp - cloudKeyFrame->mTimeStamp);
+            if (timestampDelta < bestTimestampDelta) {
+                bestTimestampDelta = timestampDelta;
+                bestCloudIndex = static_cast<int>(cloudIndex);
+            }
+        }
+
+        if (bestCloudIndex >= 0) {
+            mpEdgeFrontCloudKeyFrameMatch[static_cast<int>(edgeFrontIndex)] =
+                bestCloudIndex;
+            cloudKeyFrameMatched[bestCloudIndex] = true;
+        }
+    }
+
+    if (mpEdgeFrontCloudKeyFrameMatch.empty()) {
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_MATCH_FAILURE;
+        result.detail = "no edge-front to CloudMap timestamp matches";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    std::vector<int> firstMergeIndexes;
+    firstMergeIndexes.reserve(mpEdgeFrontCloudKeyFrameMatch.size());
+    for (const auto &match : mpEdgeFrontCloudKeyFrameMatch) {
+        firstMergeIndexes.push_back(match.first);
+    }
+    std::sort(
+        firstMergeIndexes.begin(),
+        firstMergeIndexes.end(),
+        [&edgeFrontKeyFrames](const int left, const int right) {
+            return edgeFrontKeyFrames[left]->mTimeStamp <
+                   edgeFrontKeyFrames[right]->mTimeStamp;
+        });
+
+    std::map<int, int> selectedFirstMergeMatches;
+    const size_t maxMatchCount = std::min<size_t>(50, firstMergeIndexes.size());
+    for (size_t index = 0; index < maxMatchCount; index++) {
+        const int edgeFrontIndex = firstMergeIndexes[index];
+        selectedFirstMergeMatches[edgeFrontIndex] =
+            mpEdgeFrontCloudKeyFrameMatch[edgeFrontIndex];
+    }
+
+    const bool firstSim3Succeeded = ComputeSubmapSim3(
+        mpCurrentEdgeFrontMap,
+        mpCurrentCloudMap,
+        mpEdgeFrontCloudKeyFrameMatch,
+        selectedFirstMergeMatches,
+        false,
+        mgSwEdgeFrontCloud,
+        mvpEdgeFrontCloudMatchedKeyPoints,
+        mpMapDrawer,
+        mbOldUdf,
+        mbNewUdf,
+        false);
+    if (!firstSim3Succeeded && !mbMergeAnyway) {
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_SIM3_FAILURE;
+        result.detail = "edge-front to CloudMap Sim3 failed";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    CloudMergeMap(
+        mpCurrentEdgeFrontMap,
+        mpCurrentCloudMap,
+        mgSwEdgeFrontCloud,
+        mpEdgeFrontCloudKeyFrameMatch,
+        mvpEdgeFrontCloudMatchedKeyPoints,
+        mpLocalMapper,
+        true,
+        mbOldUdf,
+        mbNewUdf);
+    mpAtlas->RemoveBadMaps();
+
+    const std::vector<KeyFrame *> &newEdgeFrontKeyFrames =
+        mpCurrentEdgeFrontMap->GetAllKeyFrames();
+    const std::vector<KeyFrame *> &edgeBackKeyFrames =
+        mpCurrentEdgeBackMap->GetAllKeyFrames();
+    std::vector<bool> edgeBackKeyFrameMatched(edgeBackKeyFrames.size(), false);
+    mpNewEdgeFrontEdgeBackKeyFrameMatch.clear();
+
+    for (size_t edgeFrontIndex = 0;
+         edgeFrontIndex < newEdgeFrontKeyFrames.size();
+         edgeFrontIndex++) {
+        KeyFrame *edgeFrontKeyFrame = newEdgeFrontKeyFrames[edgeFrontIndex];
+        if (edgeFrontKeyFrame == nullptr) {
+            continue;
+        }
+
+        double bestTimestampDelta = timestampTolerance;
+        int bestEdgeBackIndex = -1;
+        for (size_t edgeBackIndex = 0;
+             edgeBackIndex < edgeBackKeyFrames.size();
+             edgeBackIndex++) {
+            if (edgeBackKeyFrameMatched[edgeBackIndex]) {
+                continue;
+            }
+            KeyFrame *edgeBackKeyFrame = edgeBackKeyFrames[edgeBackIndex];
+            if (edgeBackKeyFrame == nullptr) {
+                continue;
+            }
+
+            const double timestampDelta = std::abs(
+                edgeFrontKeyFrame->mTimeStamp - edgeBackKeyFrame->mTimeStamp);
+            if (timestampDelta < bestTimestampDelta) {
+                bestTimestampDelta = timestampDelta;
+                bestEdgeBackIndex = static_cast<int>(edgeBackIndex);
+            }
+        }
+
+        if (bestEdgeBackIndex >= 0) {
+            mpNewEdgeFrontEdgeBackKeyFrameMatch[
+                static_cast<int>(edgeFrontIndex)] = bestEdgeBackIndex;
+            edgeBackKeyFrameMatched[bestEdgeBackIndex] = true;
+        }
+    }
+
+    if (mpNewEdgeFrontEdgeBackKeyFrameMatch.empty()) {
+        mpCurrentEdgeBackMap->ResetHaveMerged();
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_MATCH_FAILURE;
+        result.detail = "no edge-front to edge-back timestamp matches";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    std::vector<int> secondMergeIndexes;
+    secondMergeIndexes.reserve(mpNewEdgeFrontEdgeBackKeyFrameMatch.size());
+    for (const auto &match : mpNewEdgeFrontEdgeBackKeyFrameMatch) {
+        secondMergeIndexes.push_back(match.first);
+    }
+    std::sort(
+        secondMergeIndexes.begin(),
+        secondMergeIndexes.end(),
+        [&newEdgeFrontKeyFrames](const int left, const int right) {
+            return newEdgeFrontKeyFrames[left]->mTimeStamp <
+                   newEdgeFrontKeyFrames[right]->mTimeStamp;
+        });
+
+    std::map<int, int> selectedSecondMergeMatches;
+    size_t secondStart = 0;
+    if (secondMergeIndexes.size() > 50) {
+        secondStart = secondMergeIndexes.size() - 50;
+    }
+    for (size_t index = secondStart;
+         index < secondMergeIndexes.size();
+         index++) {
+        const int edgeFrontIndex = secondMergeIndexes[index];
+        selectedSecondMergeMatches[edgeFrontIndex] =
+            mpNewEdgeFrontEdgeBackKeyFrameMatch[edgeFrontIndex];
+    }
+
+    bool secondSim3Succeeded = false;
+    if (mbOldUdf || mbNewUdf) {
+        mgSwNewCloudEdgeBack = g2o::Sim3(
+            Eigen::Matrix3d::Identity(),
+            Eigen::Vector3d::Zero(),
+            1.0);
+        secondSim3Succeeded = true;
+    } else {
+        secondSim3Succeeded = ComputeSubmapSim3(
+            mpCurrentEdgeFrontMap,
+            mpCurrentEdgeBackMap,
+            mpNewEdgeFrontEdgeBackKeyFrameMatch,
+            selectedSecondMergeMatches,
+            false,
+            mgSwNewCloudEdgeBack,
+            mvpNewEdgeFrontEdgeBackMatchedKeyPoints,
+            mpMapDrawer,
+            false,
+            false,
+            false);
+    }
+
+    if (!secondSim3Succeeded && !mbMergeAnyway) {
+        mpCurrentEdgeBackMap->ResetHaveMerged();
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_SIM3_FAILURE;
+        result.detail = "edge-front to edge-back Sim3 failed";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    CloudMergeMap(
+        mpCurrentEdgeFrontMap,
+        mpCurrentEdgeBackMap,
+        mgSwNewCloudEdgeBack,
+        mpNewEdgeFrontEdgeBackKeyFrameMatch,
+        mvpNewEdgeFrontEdgeBackMatchedKeyPoints,
+        mpLocalMapper,
+        true,
+        mbOldUdf,
+        mbNewUdf);
+    if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
+        mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
+    }
+    mpCurrentEdgeFrontMap->ChangeId(mpCurrentEdgeBackMap->GetId());
+    mpCurrentEdgeFrontMap->ResetHaveMerged();
+    mpAtlas->SetMapBad(mpCurrentEdgeBackMap);
+    mpAtlas->RemoveBadMaps();
+
+    result.outcome = CloudMergeOutcome::MERGE_COMPLETED_LAND_AIR;
+    result.detail = "land/air two-stage merge completed";
+    result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
     return result;
 }
 
