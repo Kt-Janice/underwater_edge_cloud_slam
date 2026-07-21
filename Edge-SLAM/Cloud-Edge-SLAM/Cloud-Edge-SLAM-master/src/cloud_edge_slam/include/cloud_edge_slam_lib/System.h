@@ -27,6 +27,8 @@
 #include <opencv2/core/core.hpp>
 
 #include "BackendWriteController.h"
+#include "RuntimeEnvironment.h"
+#include "CloudMergeTicket.h"
 #include "Tracking.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
@@ -100,6 +102,8 @@ public:
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
     System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const bool bCloudMerge = true, const bool bCloudOnline = true, const bool bMergeAnyway = false, const bool bKFCulling = true, const int nSamplerEdgeFrontKFNum = 20, const int nSamplerEdgeBackKFNum = 20, const int nSamplerEdgeFrontMinTime = 20, const int nSamplerEdgeBackMinTime = 20, const float samplerPDKp = 0.8, const float samplerPDKd = 0.005, const float samplerPDth = 10, const bool bOldUdf = false, const bool bNewUdf = false, const int initFr = 0, const string &strSequence = std::string());
 
+    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer, const bool bCloudMerge, const bool bCloudOnline, const bool bMergeAnyway, const bool bKFCulling, const int nSamplerEdgeFrontKFNum, const int nSamplerEdgeBackKFNum, const int nSamplerEdgeFrontMinTime, const int nSamplerEdgeBackMinTime, const float samplerPDKp, const float samplerPDKd, const float samplerPDth, const bool bOldUdf, const bool bNewUdf, const int initFr, const string &strSequence, RuntimeEnvironment runtimeEnvironment);
+
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
@@ -118,6 +122,8 @@ public:
 
     void PublishCloudImages(std::vector<CloudImage> vCloudImages, std::vector<CloudImage> vCloudNoSamplingImages, int edgeFrontMapId, int edgeBackMapId);
     void InsertCloudMap(Map *pMap);
+    CloudMergeTicketPtr InsertCloudMapWithTicket(Map *pMap);
+    bool WaitForCloudMergeCompletion(const CloudMergeTicketPtr &ticket, CloudMergeResult &result);
 
     // This stops local mapping thread (map building) and performs only camera tracking.
     void ActivateLocalizationMode();
@@ -220,6 +226,7 @@ public:
     // For Cloud
     // 一个新的Frame是由Tracker构建的，有一些关于摄像头的对象从这里得到最直接，传给构建CloudMap时使用
     CloudMerging *GetCloudMerger();
+    RuntimeEnvironment GetRuntimeEnvironment() const;
     CloudImageSampler *GetCloudImageSampler();
     ORBextractor *GetInitExtractor();
     ORBextractor *GetExtractor();
@@ -244,6 +251,7 @@ private:
 
     // Input sensor
     eSensor mSensor;
+    RuntimeEnvironment mRuntimeEnvironment = RuntimeEnvironment::LAND;
 
     // ORB vocabulary used for place recognition and feature matching.
     ORBVocabulary *mpVocabulary;

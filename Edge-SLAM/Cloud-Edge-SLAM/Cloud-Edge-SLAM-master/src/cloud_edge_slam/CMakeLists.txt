@@ -184,6 +184,8 @@ include_directories(
 
 ## Declare a C++ library
 add_library(${PROJECT_NAME}_lib SHARED
+  lib_src/RuntimeEnvironment.cc
+  lib_src/CloudMergeTicket.cc
   lib_src/BackendWriteController.cc
   lib_src/System.cc
   lib_src/Tracking.cc
@@ -355,10 +357,15 @@ target_link_libraries(${PROJECT_NAME}_node
 #############
 
 ## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_cloud_edge_slam.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
+catkin_add_gtest(test_runtime_environment test/test_runtime_environment.cpp)
+if(TARGET test_runtime_environment)
+  target_link_libraries(test_runtime_environment gtest_main ${PROJECT_NAME}_lib)
+endif()
+
+catkin_add_gtest(test_cloud_merge_ticket test/test_cloud_merge_ticket.cpp)
+if(TARGET test_cloud_merge_ticket)
+  target_link_libraries(test_cloud_merge_ticket gtest_main ${PROJECT_NAME}_lib)
+endif()
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)

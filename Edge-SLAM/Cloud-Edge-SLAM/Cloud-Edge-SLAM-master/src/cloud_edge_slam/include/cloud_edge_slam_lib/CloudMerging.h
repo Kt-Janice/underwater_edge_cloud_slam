@@ -12,9 +12,13 @@
 #include "KeyFrameDatabase.h"
 
 #include <boost/algorithm/string.hpp>
+#include <cstdint>
+#include <list>
 #include <thread>
 #include <mutex>
 #include <string>
+#include "CloudMergeTicket.h"
+#include "RuntimeEnvironment.h"
 #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
 
 namespace ORB_SLAM3 {
@@ -44,6 +48,15 @@ public:
         const bool bOldUdf, const bool bNewUdf
     );
 
+    CloudMerging(
+        System *pSystem,
+        Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC,
+        const bool bWork, const bool bMergeAnyway,
+        MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer,
+        const bool bOldUdf, const bool bNewUdf,
+        RuntimeEnvironment runtimeEnvironment
+    );
+
     void SetTracker(Tracking *pTracker);
     void SetLocalMapper(LocalMapping *pLocalMapper);
     void SetLoopClosing(LoopClosing *pLoopClosing);
@@ -62,6 +75,8 @@ public:
     void Run(bool bOnline = true);
 
     void InsertCloudMap(Map *pMap);
+    CloudMergeTicketPtr InsertCloudMapWithTicket(Map *pMap);
+    bool WaitForCompletion(const CloudMergeTicketPtr &ticket, CloudMergeResult &result);
 
     void RequestReset();
     void RequestResetActiveMap(Map *pMap);
@@ -92,6 +107,8 @@ public:
 
 protected:
     bool CheckNewCloudMap(bool bOnline);
+    void CompleteCloudMap(const CloudMergeTicketPtr &ticket, CloudMergeOutcome outcome, const std::string &detail);
+    void CancelPendingCloudMaps(CloudMergeOutcome outcome, const std::string &detail);
 
     // Our Methods to implement the Cloud-Ground Map Match
     static bool ComputeSubmapSim3(
@@ -160,6 +177,16 @@ protected:
     std::list<Map *> mlpCloudMapQueue;
     std::list<Map *> dmlpCloudMapQueue; // for debug
     std::mutex mMutexCloudQueue;        // mutex 当队列在使用，这个队列是涉及多线程所以要这样
+
+    struct PendingCloudMap {
+        Map *pMap = nullptr;
+        CloudMergeTicketPtr pTicket;
+    };
+
+    std::list<PendingCloudMap> mlPendingCloudMapQueue;
+    std::uint64_t mnNextCloudMergeSequence = 0;
+    bool mbSlaShutdownRequested = false;
+    RuntimeEnvironment mRuntimeEnvironment = RuntimeEnvironment::LAND;
 
     // Start Cloud variables
     Map *mpCurrentCloudMap;
