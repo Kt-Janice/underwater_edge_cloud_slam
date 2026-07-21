@@ -192,6 +192,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   lib_src/LocalMapping.cc
   lib_src/LoopClosing.cc
   lib_src/CloudMerging.cc
+  lib_src/CloudMerging_SLA.cc
   src/SVIn2ORBWrapper.cpp # [阶段2B修改] CloudMerging.cc 需要访问 SVIn2ORBWrapper 的前端位姿缓存。
   lib_src/CloudImageSampler.cc
   lib_src/KFDSample.cc

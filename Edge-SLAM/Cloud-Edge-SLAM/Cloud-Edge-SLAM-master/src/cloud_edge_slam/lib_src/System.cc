@@ -40,8 +40,18 @@ namespace ORB_SLAM3 {
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
-               const bool bUseViewer, const bool bCloudMerge, const bool bCloudOnline, const bool bMergeAnyway, const bool bKFCulling, const int nSamplerEdgeFrontKFNum, const int nSamplerEdgeBackKFNum, const int nSamplerEdgeFrontMinTime, const int nSamplerEdgeBackMinTime, const float samplerPDKp, const float samplerPDKd, const float samplerPDth, const bool bOldUdf, const bool bNewUdf, const int initFr, const string &strSequence) ://
+               const bool bUseViewer, const bool bCloudMerge, const bool bCloudOnline, const bool bMergeAnyway, const bool bKFCulling, const int nSamplerEdgeFrontKFNum, const int nSamplerEdgeBackKFNum, const int nSamplerEdgeFrontMinTime, const int nSamplerEdgeBackMinTime, const float samplerPDKp, const float samplerPDKd, const float samplerPDth, const bool bOldUdf, const bool bNewUdf, const int initFr, const string &strSequence)
+    : System(strVocFile, strSettingsFile, sensor, bUseViewer, bCloudMerge, bCloudOnline,
+             bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum,
+             nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd,
+             samplerPDth, bOldUdf, bNewUdf, initFr, strSequence,
+             RuntimeEnvironment::LAND) {
+}
+
+System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
+               const bool bUseViewer, const bool bCloudMerge, const bool bCloudOnline, const bool bMergeAnyway, const bool bKFCulling, const int nSamplerEdgeFrontKFNum, const int nSamplerEdgeBackKFNum, const int nSamplerEdgeFrontMinTime, const int nSamplerEdgeBackMinTime, const float samplerPDKp, const float samplerPDKd, const float samplerPDth, const bool bOldUdf, const bool bNewUdf, const int initFr, const string &strSequence, RuntimeEnvironment runtimeEnvironment) ://
     mSensor(sensor),
+    mRuntimeEnvironment(runtimeEnvironment),
     mpViewer(static_cast<Viewer *>(NULL)), mbReset(false), mbResetActiveMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false) {
     // Output welcome message
@@ -209,7 +219,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC); // mSensor!=MONOCULAR);
     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
 
-    mpCloudMerger = new CloudMerging(this, mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC, bCloudMerge, bMergeAnyway, mpMapDrawer, mpFrameDrawer, bOldUdf, bNewUdf); //合并线程初始化
+    mpCloudMerger = new CloudMerging(this, mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC, bCloudMerge, bMergeAnyway, mpMapDrawer, mpFrameDrawer, bOldUdf, bNewUdf, mRuntimeEnvironment); //合并线程初始化
     mptCloudMerging = new thread(&ORB_SLAM3::CloudMerging::Run, mpCloudMerger, bCloudOnline); 
 
     //Set pointers between threads
@@ -464,6 +474,16 @@ void System::PublishCloudImages(std::vector<CloudImage> vCloudImages, std::vecto
 
 void System::InsertCloudMap(Map *pMap) {
     mpCloudMerger->InsertCloudMap(pMap);
+}
+
+CloudMergeTicketPtr System::InsertCloudMapWithTicket(Map *pMap) {
+    return mpCloudMerger->InsertCloudMapWithTicket(pMap);
+}
+
+bool System::WaitForCloudMergeCompletion(
+    const CloudMergeTicketPtr &ticket,
+    CloudMergeResult &result) {
+    return mpCloudMerger->WaitForCompletion(ticket, result);
 }
 
 BackendWriteController *System::GetBackendWriteController() {
@@ -1620,6 +1640,10 @@ Atlas *System::GetAtlas() {
 
 CloudMerging *System::GetCloudMerger() {
     return mpCloudMerger;
+}
+
+RuntimeEnvironment System::GetRuntimeEnvironment() const {
+    return mRuntimeEnvironment;
 }
 
 CloudImageSampler *System::GetCloudImageSampler() {
