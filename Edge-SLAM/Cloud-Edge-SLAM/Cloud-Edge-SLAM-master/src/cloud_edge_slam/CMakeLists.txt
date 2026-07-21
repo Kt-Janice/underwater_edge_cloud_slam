@@ -223,6 +223,16 @@ add_library(${PROJECT_NAME}_lib SHARED
 
 )
 
+# Compile the unified merger before the Task 17 source switch.  This target is
+# intentionally not linked into the active library and is removed at the switch.
+add_library(cloud_edge_sla_merging_compile_check OBJECT
+  lib_src/CloudMerging_SLA.cc
+)
+add_dependencies(cloud_edge_sla_merging_compile_check
+  ${catkin_EXPORTED_TARGETS}
+  cloud_edge_slam_gencpp
+)
+
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
