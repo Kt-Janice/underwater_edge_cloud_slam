@@ -1,12 +1,16 @@
 #include "CloudMerging.h"
 #include "Map.h"
 #include "MapDrawer.h"
+#include "SVIn2ORBWrapper.h"
+#include "System.h"
 
 #include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
 #include <utility>
+
+extern SVIn2ORBWrapper *pSVIn2ORBWrapper;
 
 namespace ORB_SLAM3 {
 
@@ -290,8 +294,102 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
         return result;
     }
 
+    if (mpSystem == nullptr) {
+        result.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
+        result.detail = "System is unavailable for sea merge";
+        return result;
+    }
+
+    BackendWriteController *backendController =
+        mpSystem->GetBackendWriteController();
+    if (backendController == nullptr ||
+        !backendController->EnterMergingAndWait()) {
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_BACKEND_BLOCK;
+        result.detail = "BackendWriteController rejected sea merge";
+        return result;
+    }
+
+    result = RunLandAirCloudMerge(pending);
+    if (result.outcome != CloudMergeOutcome::MERGE_COMPLETED_LAND_AIR) {
+        mpSystem->ExitBackendMerging();
+        return result;
+    }
+
+    const MergeFinishResult finishResult =
+        mpSystem->FinishBackendMergingAndMaybeEnterReplaying();
+    if (finishResult == MergeFinishResult::EXITED_TO_IDLE_LOST) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_SKIPPED_LOST;
+        result.detail = "sea merge completed while LOST backend block was active";
+        return result;
+    }
+    if (finishResult == MergeFinishResult::EXITED_TO_IDLE_SHUTDOWN) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_SKIPPED_SHUTDOWN;
+        result.detail = "sea merge completed during backend shutdown";
+        return result;
+    }
+    if (finishResult != MergeFinishResult::ENTERED_REPLAYING) {
+        result.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
+        result.detail = "BackendWriteController did not enter REPLAYING";
+        return result;
+    }
+
+    if (::pSVIn2ORBWrapper == nullptr) {
+        mpSystem->ExitBackendReplayingAndWaitForDrain();
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_ABORTED_SHUTDOWN;
+        result.detail = "SVIn2ORBWrapper is unavailable for replay";
+        return result;
+    }
+
+    const SVIn2ORBWrapper::ReplayMergeDeferredOutcome replayOutcome =
+        ::pSVIn2ORBWrapper->ReplayMergeDeferredBufferWithOutcome();
+    if (mpSystem->GetBackendWriteState() == BackendWriteState::REPLAYING) {
+        mpSystem->ExitBackendReplayingAndWaitForDrain();
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::COMPLETED) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_COMPLETED;
+        result.detail = "sea merge and deferred replay completed";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::SKIPPED_EMPTY) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_COMPLETED;
+        result.detail = "sea merge completed with no deferred replay frames";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::SKIPPED_LOST) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_SKIPPED_LOST;
+        result.detail = "deferred replay skipped by LOST";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::SKIPPED_SHUTDOWN) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_SKIPPED_SHUTDOWN;
+        result.detail = "deferred replay skipped by shutdown";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::ABORTED_WARNING) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_ABORTED_WARNING;
+        result.detail = "deferred replay aborted by WARNING";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::ABORTED_LOST) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_ABORTED_LOST;
+        result.detail = "deferred replay aborted by LOST";
+        return result;
+    }
+    if (replayOutcome ==
+        SVIn2ORBWrapper::ReplayMergeDeferredOutcome::ABORTED_SHUTDOWN) {
+        result.outcome = CloudMergeOutcome::MERGED_REPLAY_ABORTED_SHUTDOWN;
+        result.detail = "deferred replay aborted by shutdown";
+        return result;
+    }
+
     result.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
-    result.detail = "sea strategy has not been migrated";
+    result.detail = "deferred replay failed";
     return result;
 }
 
