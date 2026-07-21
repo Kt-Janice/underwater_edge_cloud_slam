@@ -50,6 +50,7 @@ message(STATUS "当前抓取到的 Eigen3 版本: ${Eigen3_VERSION}")
 message(STATUS "当前抓取到的 Eigen3 路径: ${Eigen3_DIR}")
 message(STATUS "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 find_package(Pangolin REQUIRED)
+find_package(PCL REQUIRED) #cap
 
 
 ## Uncomment this if the package has a setup.py. This macro ensures
@@ -166,6 +167,7 @@ include_directories(
   Thirdparty/Sophus
   ${EIGEN3_INCLUDE_DIR}
   ${Pangolin_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS} #cap
   ${catkin_INCLUDE_DIRS}
   /home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/okvis_ros/okvis/okvis_core/include
   /home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/okvis_ros/okvis/okvis_cv/include
@@ -192,7 +194,7 @@ add_library(${PROJECT_NAME}_lib SHARED
   lib_src/Tracking.cc
   lib_src/LocalMapping.cc
   lib_src/LoopClosing.cc
-  lib_src/CloudMerging.cc
+  lib_src/CloudMerging_SLA.cc
   src/SVIn2ORBWrapper.cpp # [阶段2B修改] CloudMerging.cc 需要访问 SVIn2ORBWrapper 的前端位姿缓存。
   lib_src/CloudImageSampler.cc
   lib_src/KFDSample.cc
@@ -224,26 +226,6 @@ add_library(${PROJECT_NAME}_lib SHARED
 
 )
 
-# Compile the unified merger before the Task 17 source switch.  This target is
-# intentionally not linked into the active library and is removed at the switch.
-add_library(cloud_edge_sla_merging_compile_check OBJECT
-  lib_src/CloudMerging_SLA.cc
-)
-add_dependencies(cloud_edge_sla_merging_compile_check
-  ${catkin_EXPORTED_TARGETS}
-  cloud_edge_slam_gencpp
-)
-
-# Compile the unified entry transaction core before Task 17 replaces the
-# active executable source.  This target is removed during that source switch.
-add_library(cloud_edge_sla_entry_compile_check OBJECT
-  src/cloud_edge.cpp
-)
-add_dependencies(cloud_edge_sla_entry_compile_check
-  ${catkin_EXPORTED_TARGETS}
-  cloud_edge_slam_gencpp
-)
-
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
@@ -254,16 +236,8 @@ add_dependencies(cloud_edge_sla_entry_compile_check
 ## The recommended prefix ensures that target names across packages don't collide
 # add_executable(${PROJECT_NAME}_node src/cloud_edge_slam_node.cpp)
 
-add_executable(${PROJECT_NAME}_node src/cloud_edge_main.cpp)
+add_executable(${PROJECT_NAME}_node src/cloud_edge.cpp)
 add_dependencies(${PROJECT_NAME}_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
-
-link_directories(/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/devel/lib)
-add_executable(cloud_edge_demo_node
-  src/cloud_edge_demo.cpp
-)
-add_dependencies(cloud_edge_demo_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
-
-find_package(PCL REQUIRED) #cap
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
@@ -279,18 +253,6 @@ find_package(PCL REQUIRED) #cap
 # target_link_libraries(${PROJECT_NAME}_node
 #   ${catkin_LIBRARIES}
 # )
-target_link_libraries(cloud_edge_demo_node
-  ${OpenCV_LIBS}
-  ${EIGEN3_LIBS}
-  ${Pangolin_LIBRARIES}
-  ${PCL_LIBRARIES} #cap
-  ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
-  ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.a
-  -lboost_serialization
-  -lcrypto
-  ${catkin_LIBRARIES}
-)
-
 target_link_libraries(${PROJECT_NAME}_lib
   ${OpenCV_LIBS}
   ${EIGEN3_LIBS}
@@ -305,7 +267,7 @@ target_link_libraries(${PROJECT_NAME}_lib
 
 set(OKVIS_LIB_PATH "/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/devel/lib")
 
-target_link_libraries(cloud_edge_demo_node
+target_link_libraries(${PROJECT_NAME}_node
   ${PROJECT_NAME}_lib
   ${catkin_LIBRARIES}
   ${OKVIS_LIB_PATH}/libokvis_ros.a
@@ -318,18 +280,6 @@ target_link_libraries(cloud_edge_demo_node
   ${OKVIS_LIB_PATH}/libokvis_cv.a
   ${OKVIS_LIB_PATH}/libokvis_time.a
   ${OKVIS_LIB_PATH}/libokvis_util.a
-)
-
-target_link_libraries(${PROJECT_NAME}_node
-  ${PROJECT_NAME}_lib
-  # ${OpenCV_LIBS}
-  # ${EIGEN3_LIBS}
-  # ${Pangolin_LIBRARIES}
-  # ${PROJECT_SOURCE_DIR}/../../../Thirdparty/DBoW2/lib/libDBoW2.so
-  # ${PROJECT_SOURCE_DIR}/../../../Thirdparty/g2o/lib/libg2o.so
-  # ${PROJECT_SOURCE_DIR}/../../../lib/libORB_SLAM3.so
-  # -lboost_system
-  ${catkin_LIBRARIES}
 )
 #############
 ## Install ##
@@ -391,6 +341,11 @@ endif()
 catkin_add_gtest(test_cloud_upload_transaction_gate test/test_cloud_upload_transaction_gate.cpp)
 if(TARGET test_cloud_upload_transaction_gate)
   target_link_libraries(test_cloud_upload_transaction_gate gtest_main ${PROJECT_NAME}_lib)
+endif()
+
+catkin_add_gtest(test_cloud_upload_lifecycle test/test_cloud_upload_lifecycle.cpp)
+if(TARGET test_cloud_upload_lifecycle)
+  target_link_libraries(test_cloud_upload_lifecycle gtest_main)
 endif()
 
 ## Add folders to be run by python nosetests

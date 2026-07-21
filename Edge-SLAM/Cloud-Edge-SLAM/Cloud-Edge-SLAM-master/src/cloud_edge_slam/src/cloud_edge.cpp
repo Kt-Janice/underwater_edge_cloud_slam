@@ -1,6 +1,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,68 @@ struct UploadLifecycleState {
     std::size_t nextWakeCallbackId = 0U;
     std::map<std::size_t, std::function<void()>> wakeCallbacks;
 };
+
+enum class LostRecoveryUploadState {
+    EMPTY,
+    AWAITING_RECOVERY,
+    AVAILABLE,
+    DISPATCHING,
+    CONSUMED
+};
+
+LostRecoveryUploadState FinalizedLostRecoveryUploadState(
+    const bool dispatchStarted) {
+    if (dispatchStarted) {
+        return LostRecoveryUploadState::CONSUMED;
+    }
+    return LostRecoveryUploadState::AVAILABLE;
+}
+
+class UploadDispatchStartHandshake {
+public:
+    UploadDispatchStartHandshake()
+        : mFuture(mPromise.get_future().share()) {
+    }
+
+    std::shared_future<bool> GetFuture() const {
+        return mFuture;
+    }
+
+    void Report(const bool started) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        if (mReported) {
+            return;
+        }
+        mReported = true;
+        mPromise.set_value(started);
+    }
+
+private:
+    mutable std::mutex mMutex;
+    bool mReported = false;
+    std::promise<bool> mPromise;
+    std::shared_future<bool> mFuture;
+};
+
+template <typename RegisterWake, typename SendGoal>
+bool StartUploadDispatchAndReport(
+    UploadDispatchStartHandshake &handshake,
+    const RegisterWake &registerWake,
+    const SendGoal &sendGoal) {
+    try {
+        if (!registerWake()) {
+            handshake.Report(false);
+            return false;
+        }
+        sendGoal();
+    } catch (...) {
+        handshake.Report(false);
+        throw;
+    }
+
+    handshake.Report(true);
+    return true;
+}
 
 class ActiveUpload {
 public:
@@ -87,6 +150,19 @@ ActiveUpload TryStartUpload(
     return ActiveUpload(state);
 }
 
+template <typename Callback>
+bool RunWithActiveUpload(
+    const std::shared_ptr<UploadLifecycleState> &state,
+    const Callback &callback) {
+    ActiveUpload activeUpload = TryStartUpload(state);
+    if (!activeUpload) {
+        return false;
+    }
+
+    callback();
+    return true;
+}
+
 void StopAcceptingUploads(
     const std::shared_ptr<UploadLifecycleState> &state) {
     if (state == nullptr) {
@@ -107,10 +183,23 @@ std::size_t RegisterUploadWakeCallback(
         return 0U;
     }
 
-    std::lock_guard<std::mutex> lock(state->mutex);
-    state->nextWakeCallbackId++;
-    state->wakeCallbacks[state->nextWakeCallbackId] = callback;
-    return state->nextWakeCallbackId;
+    std::size_t callbackId = 0U;
+    bool wakeImmediately = false;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->acceptingUploads) {
+            wakeImmediately = true;
+        } else {
+            state->nextWakeCallbackId++;
+            callbackId = state->nextWakeCallbackId;
+            state->wakeCallbacks[callbackId] = callback;
+        }
+    }
+
+    if (wakeImmediately) {
+        callback();
+    }
+    return callbackId;
 }
 
 void UnregisterUploadWakeCallback(
@@ -154,6 +243,14 @@ void WaitForActiveUploads(
     state->cv.wait(lock, [state]() {
         return state->activeUploadCount == 0U;
     });
+}
+
+template <typename CancelGoals>
+void DrainUploadsAndCancelLateGoals(
+    const std::shared_ptr<UploadLifecycleState> &state,
+    const CancelGoals &cancelGoals) {
+    WaitForActiveUploads(state);
+    cancelGoals();
 }
 
 std::size_t GetActiveUploadCountForTesting(
@@ -556,10 +653,12 @@ public:
         const cloud_edge_slam::CloudSlamGoal &goal,
         const std::vector<sensor_msgs::CompressedImagePtr> &images,
         const TicketRegistrar &ticketRegistrar,
-        const TicketWaiter &ticketWaiter) {
+        const TicketWaiter &ticketWaiter,
+        UploadDispatchStartHandshake &startHandshake) {
         ORB_SLAM3::CloudUploadTransactionGate::Lease transactionLease =
             mTransactionGate.Acquire();
         if (!IsAcceptingUploadsForTesting(mLifecycleState)) {
+            startHandshake.Report(false);
             CloudUploadResult result;
             result.failureReason = "cloud upload gate is closed";
             return result;
@@ -568,31 +667,47 @@ public:
         std::shared_ptr<CloudUploadContext> context =
             std::make_shared<CloudUploadContext>();
         std::weak_ptr<CloudUploadContext> weakContext(context);
-        const std::size_t wakeCallbackId = RegisterUploadWakeCallback(
-            mLifecycleState,
-            [weakContext]() {
-                std::shared_ptr<CloudUploadContext> lockedContext =
-                    weakContext.lock();
-                if (lockedContext == nullptr) {
-                    return;
-                }
-                {
-                    std::lock_guard<std::mutex> lock(lockedContext->mutex);
-                    lockedContext->shutdownRequested = true;
-                }
-                lockedContext->condition.notify_all();
-            });
+        std::size_t wakeCallbackId = 0U;
 
         try {
-            client.sendGoal(
-                goal,
-                [context](
-                    const actionlib::SimpleClientGoalState &state,
-                    const cloud_edge_slam::CloudSlamResultConstPtr &result) {
-                    ActionFinishCb(context, state, result);
+            const bool dispatchStarted = StartUploadDispatchAndReport(
+                startHandshake,
+                [&]() {
+                    wakeCallbackId = RegisterUploadWakeCallback(
+                        mLifecycleState,
+                        [weakContext]() {
+                            std::shared_ptr<CloudUploadContext> lockedContext =
+                                weakContext.lock();
+                            if (lockedContext == nullptr) {
+                                return;
+                            }
+                            {
+                                std::lock_guard<std::mutex> lock(
+                                    lockedContext->mutex);
+                                lockedContext->shutdownRequested = true;
+                            }
+                            lockedContext->condition.notify_all();
+                        });
+                    return wakeCallbackId != 0U;
                 },
-                CloudClient::SimpleActiveCallback(),
-                CloudClient::SimpleFeedbackCallback());
+                [&]() {
+                    client.sendGoal(
+                        goal,
+                        [context](
+                            const actionlib::SimpleClientGoalState &state,
+                            const cloud_edge_slam::CloudSlamResultConstPtr
+                                &result) {
+                            ActionFinishCb(context, state, result);
+                        },
+                        CloudClient::SimpleActiveCallback(),
+                        CloudClient::SimpleFeedbackCallback());
+                });
+            if (!dispatchStarted) {
+                CloudUploadResult result;
+                result.failureReason =
+                    "cloud upload cancelled during shutdown";
+                return result;
+            }
         } catch (...) {
             UnregisterUploadWakeCallback(mLifecycleState, wakeCallbackId);
             throw;
@@ -1054,14 +1169,6 @@ struct LostUploadRequest {
     LostUploadStartMode candidateMode = LostUploadStartMode::LEGACY_FALLBACK;
 };
 
-enum class LostRecoveryUploadState {
-    EMPTY,
-    AWAITING_RECOVERY,
-    AVAILABLE,
-    DISPATCHING,
-    CONSUMED
-};
-
 class RuntimePhaseDiagnosticScope {
 public:
     explicit RuntimePhaseDiagnosticScope(std::atomic<int> &activeCount)
@@ -1103,7 +1210,7 @@ public:
 
     void RawImageCb(const sensor_msgs::ImageConstPtr &message);
     void TrackingWatchdog(const MarginalizedData &data);
-    void UploadLostImages(LostUploadRequest request);
+    bool UploadLostImages(LostUploadRequest request);
     void BeginLostRecoveryUploadEvent(std::uint64_t generation);
     bool PreparePendingLostRecoveryUpload(
         std::uint64_t generation,
@@ -1232,16 +1339,31 @@ void UnifiedGrabber::ShutdownUploads() {
         return;
     }
 
-    StopWatchdogCallbacks();
     StopAcceptingUploads(mpUploadLifecycle);
-    if (mpSLAM != nullptr && mpSLAM->GetCloudMerger() != nullptr) {
-        mpSLAM->GetCloudMerger()->RequestFinish();
+    ORB_SLAM3::CloudMerging *cloudMerger = nullptr;
+    if (mpSLAM != nullptr) {
+        cloudMerger = mpSLAM->GetCloudMerger();
+    }
+    if (cloudMerger != nullptr) {
+        cloudMerger->RequestFinish();
     }
     if (mpCloudClient != nullptr) {
         mpCloudClient->cancelAllGoals();
     }
     WakeUploadWaiters(mpUploadLifecycle);
-    WaitForActiveUploads(mpUploadLifecycle);
+    DrainUploadsAndCancelLateGoals(
+        mpUploadLifecycle,
+        [this]() {
+            if (mpCloudClient != nullptr) {
+                mpCloudClient->cancelAllGoals();
+            }
+        });
+    if (cloudMerger != nullptr) {
+        while (!cloudMerger->isFinished()) {
+            usleep(5000);
+        }
+    }
+    StopWatchdogCallbacks();
 }
 
 bool UnifiedGrabber::DispatchCloudImages(
@@ -1309,11 +1431,15 @@ bool UnifiedGrabber::DispatchCloudImages(
     ORB_SLAM3::System *slam = mpSLAM;
     const bool oldUdf = mConfig.oldUdf;
     const bool newUdf = mConfig.newUdf;
+    std::shared_ptr<UploadDispatchStartHandshake> startHandshake =
+        std::make_shared<UploadDispatchStartHandshake>();
+    std::shared_future<bool> dispatchStarted = startHandshake->GetFuture();
 
     std::function<void()> dispatch = [
         activeUploadHolder,
         transactionGate,
         lifecycleState,
+        startHandshake,
         client,
         publisher,
         slam,
@@ -1336,7 +1462,8 @@ bool UnifiedGrabber::DispatchCloudImages(
                     oldUdf,
                     newUdf,
                     lifecycleState),
-                MakeTicketWaiter(*slam));
+                MakeTicketWaiter(*slam),
+                *startHandshake);
             if (!result.actionSucceeded || !result.mergeSucceeded) {
                 ROS_ERROR_STREAM(
                     "Cloud upload transaction failed: "
@@ -1349,16 +1476,18 @@ bool UnifiedGrabber::DispatchCloudImages(
                     << result.mergeResults.size());
             }
         } catch (const std::exception &exception) {
+            startHandshake->Report(false);
             ROS_ERROR_STREAM(
                 "Cloud upload transaction threw: " << exception.what());
         } catch (...) {
+            startHandshake->Report(false);
             ROS_ERROR("Cloud upload transaction threw an unknown exception");
         }
     };
 
     if (waitInCaller) {
         dispatch();
-        return true;
+        return dispatchStarted.get();
     }
 
     std::thread uploadThread;
@@ -1378,7 +1507,7 @@ bool UnifiedGrabber::DispatchCloudImages(
             dispatch();
         }
     }
-    return true;
+    return dispatchStarted.get();
 }
 
 void UnifiedGrabber::TrackImage(
@@ -1662,11 +1791,19 @@ bool UnifiedGrabber::FinalizePendingLostRecoveryUpload(
             return true;
         }
         request = mPreparedLostUpload;
-        mLostUploadState = LostRecoveryUploadState::CONSUMED;
     }
 
-    UploadLostImages(request);
-    return true;
+    const bool dispatchStarted = UploadLostImages(request);
+    {
+        std::lock_guard<std::mutex> lock(mLostUploadMutex);
+        if (mLostUploadGeneration != generation ||
+            mLostUploadState != LostRecoveryUploadState::DISPATCHING) {
+            return false;
+        }
+        mLostUploadState =
+            FinalizedLostRecoveryUploadState(dispatchStarted);
+    }
+    return dispatchStarted;
 }
 
 TrackingState UnifiedGrabber::GetTrackingState() {
@@ -1871,7 +2008,7 @@ std::vector<ORB_SLAM3::CloudImage> UnifiedGrabber::SnapshotLostImages(
     return images;
 }
 
-void UnifiedGrabber::UploadLostImages(LostUploadRequest request) {
+bool UnifiedGrabber::UploadLostImages(LostUploadRequest request) {
     RuntimePhaseDiagnosticScope jpegScope(mJpegUploadActive);
     int edgeFrontMapId = 0;
     int edgeBackMapId = 0;
@@ -1883,12 +2020,12 @@ void UnifiedGrabber::UploadLostImages(LostUploadRequest request) {
         ROS_WARN_STREAM(
             "No images found for LOST upload generation "
             << request.generation);
-        return;
+        return false;
     }
     ROS_INFO_STREAM(
         "Dispatching LOST upload generation " << request.generation
         << " with " << images.size() << " images");
-    DispatchCloudImages(
+    return DispatchCloudImages(
         images,
         edgeFrontMapId,
         edgeBackMapId,
@@ -1977,50 +2114,74 @@ void UnifiedGrabber::RunSeaRuntime(ros::NodeHandle &nodeHandle) {
     if (mpWrapper == nullptr) {
         throw std::runtime_error("sea runtime requires SVIn2ORBWrapper");
     }
+    const std::shared_ptr<UploadLifecycleState> lifecycleState =
+        mpUploadLifecycle;
     mpWrapper->RegisterStateCallbacks(
-        std::bind(
-            &UnifiedGrabber::TrackingWatchdog,
-            this,
-            std::placeholders::_1),
-        std::bind(&UnifiedGrabber::GetTrackingState, this));
+        [this, lifecycleState](const MarginalizedData &data) {
+            RunWithActiveUpload(
+                lifecycleState,
+                [this, &data]() {
+                    TrackingWatchdog(data);
+                });
+        },
+        [this, lifecycleState]() {
+            ActiveUpload activeUpload = TryStartUpload(lifecycleState);
+            if (!activeUpload) {
+                return TrackingState::LOST;
+            }
+            return GetTrackingState();
+        });
     mpWrapper->RegisterLostTopologyCallbacks(
-        std::bind(
-            &UnifiedGrabber::BeginLostRecoveryUploadEvent,
-            this,
-            std::placeholders::_1),
-        std::bind(
-            &UnifiedGrabber::PreparePendingLostRecoveryUpload,
-            this,
-            std::placeholders::_1,
-            std::placeholders::_2),
-        std::bind(
-            &UnifiedGrabber::FinalizePendingLostRecoveryUpload,
-            this,
-            std::placeholders::_1,
-            std::placeholders::_2));
+        [this, lifecycleState](const std::uint64_t generation) {
+            RunWithActiveUpload(
+                lifecycleState,
+                [this, generation]() {
+                    BeginLostRecoveryUploadEvent(generation);
+                });
+        },
+        [this, lifecycleState](
+            const std::uint64_t generation,
+            const LostUploadBoundarySnapshot boundary) {
+            ActiveUpload activeUpload = TryStartUpload(lifecycleState);
+            if (!activeUpload) {
+                return false;
+            }
+            return PreparePendingLostRecoveryUpload(generation, boundary);
+        },
+        [this, lifecycleState](
+            const std::uint64_t generation,
+            const bool commit) {
+            ActiveUpload activeUpload = TryStartUpload(lifecycleState);
+            if (!activeUpload) {
+                return false;
+            }
+            return FinalizePendingLostRecoveryUpload(generation, commit);
+        });
 
     okvis::RosParametersReader parameterReader(mConfig.settingPath);
     okvis::VioParameters parameters;
     parameterReader.getParameters(parameters);
     SetImageDelay(parameters.sensors_information.imageDelay);
-    okvis::ThreadedKFVio estimator(parameters);
     okvis::Publisher publisher(nodeHandle);
     publisher.setCsvFile(mSaveDirectory + "/okvis_estimator_output.csv");
     publisher.setLandmarksCsvFile(
         mSaveDirectory + "/okvis_estimator_landmarks.csv");
-    ConfigureOkvisEstimator(&estimator, &publisher, parameters);
-    okvis::Subscriber subscriber(nodeHandle, &estimator, parameterReader);
-    ros::Subscriber rawImageSubscriber = nodeHandle.subscribe(
-        mConfig.rawImageTopic,
-        200,
-        &UnifiedGrabber::RawImageCb,
-        this);
-    static_cast<void>(subscriber);
-    static_cast<void>(rawImageSubscriber);
-    if (mConfig.cloudOnline) {
-        ROS_INFO("Sea runtime ready for sensor streams");
-        ros::MultiThreadedSpinner spinner(4);
-        spinner.spin();
+    {
+        okvis::ThreadedKFVio estimator(parameters);
+        ConfigureOkvisEstimator(&estimator, &publisher, parameters);
+        okvis::Subscriber subscriber(nodeHandle, &estimator, parameterReader);
+        ros::Subscriber rawImageSubscriber = nodeHandle.subscribe(
+            mConfig.rawImageTopic,
+            200,
+            &UnifiedGrabber::RawImageCb,
+            this);
+        static_cast<void>(subscriber);
+        static_cast<void>(rawImageSubscriber);
+        if (mConfig.cloudOnline) {
+            ROS_INFO("Sea runtime ready for sensor streams");
+            ros::MultiThreadedSpinner spinner(4);
+            spinner.spin();
+        }
     }
 }
 
@@ -2464,7 +2625,6 @@ int RunUnifiedMain(int argc, char **argv) {
         std::chrono::duration_cast<std::chrono::duration<double>>(
             std::chrono::steady_clock::now() - start).count();
 
-    grabber.StopWatchdogCallbacks();
     grabber.ShutdownUploads();
     slam.Shutdown();
     ExportRuntimeTrajectories(
