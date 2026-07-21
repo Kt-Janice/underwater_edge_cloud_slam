@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -360,6 +361,35 @@ private:
 
     ORB_SLAM3::CloudUploadTransactionGate &mTransactionGate;
 };
+
+CloudUploadTransactionCoordinator::TicketRegistrar MakeTicketRegistrar(
+    ORB_SLAM3::System &slam) {
+    return [&slam](const cloud_edge_slam::CloudSlamResultConstPtr &result) {
+        if (!result) {
+            throw std::runtime_error("CloudSlam Action returned no result");
+        }
+
+        cloud_edge_slam::CloudMapConstPtr rosMap(
+            new cloud_edge_slam::CloudMap(result->map));
+        ORB_SLAM3::Map *cloudMap = ConvertCloudMap(slam, rosMap);
+        if (cloudMap == nullptr) {
+            throw std::runtime_error("CloudMap conversion failed");
+        }
+
+        std::vector<ORB_SLAM3::CloudMergeTicketPtr> tickets;
+        tickets.push_back(slam.InsertCloudMapWithTicket(cloudMap));
+        return tickets;
+    };
+}
+
+CloudUploadTransactionCoordinator::TicketWaiter MakeTicketWaiter(
+    ORB_SLAM3::System &slam) {
+    return [&slam](
+               const ORB_SLAM3::CloudMergeTicketPtr &ticket,
+               ORB_SLAM3::CloudMergeResult &result) {
+        return slam.WaitForCloudMergeCompletion(ticket, result);
+    };
+}
 
 ORB_SLAM3::RuntimeEnvironment ParseRuntimeEnvironmentParameter(
     ros::NodeHandle &nodeHandle) {
