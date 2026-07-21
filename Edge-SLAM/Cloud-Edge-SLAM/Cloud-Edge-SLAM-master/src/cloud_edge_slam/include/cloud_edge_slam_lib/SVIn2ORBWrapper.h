@@ -147,7 +147,20 @@ public:
     bool GetNearestFrontendPoseWithTimeGap(const double timestamp, const double tolerance, Sophus::SE3f &Twc, double &timeGap);
 
     // [BackendWriteGate] CloudMerge 后 replay MERGING 期间缓存的 NORMAL 注入帧。
+    enum class ReplayMergeDeferredOutcome {
+        COMPLETED,
+        SKIPPED_EMPTY,
+        SKIPPED_LOST,
+        SKIPPED_SHUTDOWN,
+        ABORTED_WARNING,
+        ABORTED_LOST,
+        ABORTED_SHUTDOWN,
+        ABORTED_INVALID_BUFFER,
+        FAILED
+    };
+
     void ReplayMergeDeferredBuffer();
+    ReplayMergeDeferredOutcome ReplayMergeDeferredBufferWithOutcome();
     bool CanReplayDeferredBuffers() const;
     size_t GetMergeDeferredFrameCount();
     // [SecondMergeMatchDebug] 只读复制 MERGING 期间缓存帧的 timestamp，不清空或修改 buffer。

@@ -1052,9 +1052,14 @@ size_t SVIn2ORBWrapper::ReplayCachedDeferredFrames(
 }
 
 void SVIn2ORBWrapper::ReplayMergeDeferredBuffer() {
+    static_cast<void>(ReplayMergeDeferredBufferWithOutcome());
+}
+
+SVIn2ORBWrapper::ReplayMergeDeferredOutcome
+SVIn2ORBWrapper::ReplayMergeDeferredBufferWithOutcome() {
     if (mpSLAM == nullptr) {
         std::cout << "[BackendWriteGate][ERROR] Cannot replay MergeDeferredBuffer because System is null." << std::endl;
-        return;
+        return ReplayMergeDeferredOutcome::FAILED;
     }
 
     const auto replayStart = std::chrono::steady_clock::now();
@@ -1571,6 +1576,36 @@ void SVIn2ORBWrapper::ReplayMergeDeferredBuffer() {
               << ", duration_ms="
               << durationMs.count()
               << std::endl;
+
+    if (!bAborted) {
+        if (warningSnapshotCount == 0 &&
+            mergeSnapshotCount == 0 &&
+            normalSnapshotCount == 0) {
+            return ReplayMergeDeferredOutcome::SKIPPED_EMPTY;
+        }
+
+        return ReplayMergeDeferredOutcome::COMPLETED;
+    }
+
+    if (abortReason.find("LOST") != std::string::npos ||
+        abortReason.find("lost") != std::string::npos) {
+        return ReplayMergeDeferredOutcome::ABORTED_LOST;
+    }
+
+    if (abortReason.find("shutdown") != std::string::npos) {
+        return ReplayMergeDeferredOutcome::ABORTED_SHUTDOWN;
+    }
+
+    if (abortReason.find("invalid") != std::string::npos) {
+        return ReplayMergeDeferredOutcome::ABORTED_INVALID_BUFFER;
+    }
+
+    if (abortReason.find("WARNING") != std::string::npos ||
+        abortReason.find("warning") != std::string::npos) {
+        return ReplayMergeDeferredOutcome::ABORTED_WARNING;
+    }
+
+    return ReplayMergeDeferredOutcome::FAILED;
 }
 
 void SVIn2ORBWrapper::InjectSVIn2MarginalizedData(const MarginalizedData& data) {
