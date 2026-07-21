@@ -140,7 +140,7 @@ public:
     void CacheFrontendPose(const double timestamp, const Sophus::SE3f &Twc);
 
     // [阶段2B修改] 按时间戳查询最近的 OKVIS / SVIn2 前端位姿。
-    // CloudMerging.cc 用该接口构造 OKVIS-CloudMap 相邻运动一致性权重。
+    // CloudMerging.cc 用该接口构造 frontend/OKVIS 与 CloudMap 的 Sim3 点对对齐。
     bool GetNearestFrontendPose(const double timestamp, const double tolerance, Sophus::SE3f &Twc);
 
     // [CloudMap校正诊断] 按时间戳查询最近前端位姿，并返回匹配时间差，仅用于诊断导出。

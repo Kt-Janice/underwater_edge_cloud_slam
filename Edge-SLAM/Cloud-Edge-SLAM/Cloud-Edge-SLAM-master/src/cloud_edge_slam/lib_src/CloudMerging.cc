@@ -1827,12 +1827,10 @@ void CloudMerging::Run(bool bOnline) {
             if (bSkipCloudMergeDueToCorrectionFailure) {
                 std::cout << "[CloudMerging][Sim3][ERROR] Skip CloudMergeMap because selected CloudMap correction failed." << std::endl;
             } else if (mbOldUdf || mbNewUdf) {
-                // 【核心修复：绝对单位阵注入，锁定平滑后的 CloudMap】
-                // 此时 CloudMap 已经在内存中通过 Sim(3) 插值补偿被完美掰弯，首尾已经贴合红圈。
-                // 注入单位阵，防止原生的 ComputeSubmapSim3 因为伪造特征点产生错误的拉扯。
+                // SIM3_ONLY 已完成 CloudMap 单侧写回；注入单位阵防止再次变换 CloudMap。
                 mgSwEdgeFrontCloud = g2o::Sim3(Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(), 1.0);
                 bComputeEdgeFront = true;
-                cerr << "\033[1;32m[CloudMerging] Bypass 1st ComputeSubmapSim3. Injected Identity Sim3 to PROTECT CloudMap!\033[0m" << endl;
+                // cerr << "\033[1;32m[CloudMerging] Bypass 1st ComputeSubmapSim3. Injected Identity Sim3 to PROTECT CloudMap!\033[0m" << endl;
             } else {
                 bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
             }
@@ -2151,7 +2149,7 @@ void CloudMerging::Run(bool bOnline) {
                     // 因此，我们强制注入单位阵，让后续的 CloudMergeMap 仅仅执行“内存指针合并”，绝不修改任何 XYZ 坐标。
                     mgSwNewCloudEdgeBack = g2o::Sim3(Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(), 1.0);
                     bComputeEdgeBack = true;
-                    cerr << "\033[1;32m[CloudMerging] Bypass 2nd ComputeSubmapSim3. Injected Identity Sim3 to PROTECT EdgeBack!\033[0m" << endl;
+                    // cerr << "\033[1;32m[CloudMerging] Bypass 2nd ComputeSubmapSim3. Injected Identity Sim3 to PROTECT EdgeBack!\033[0m" << endl;
                 } else {
                     // 只有在非 UDF (纯视觉特征) 模式下，才走原生的特征点匹配求解逻辑
                     bool mbedge_merge = false;
@@ -3172,9 +3170,9 @@ void CloudMerging::CloudMergeMap(
             }
         }
     } else {
-        cerr << "\033[1;32m[UDF BYPASS] Skipping cross-map visual observations.\033[0m" << endl;
+        // cerr << "\033[1;32m[UDF BYPASS] Skipping cross-map visual observations.\033[0m" << endl;
     }
-    cerr << "Test: Add observation num: " << nAddObservation << endl;
+    // cerr << "Test: Add observation num: " << nAddObservation << endl;
 
     Sophus::SE3d Twc = pRandMergedKF->GetPoseInverse().cast<double>();
     g2o::Sim3 g2oNonCorrectedSwc(Twc.unit_quaternion(), Twc.translation(), 1.0);
@@ -3301,37 +3299,15 @@ void CloudMerging::CloudMergeMap(
     KeyFrame *pNewParent = nullptr;
     KeyFrame *pMergedOriginKF = pMergedMap->GetOriginKF();
 
-    std::cerr << "[CloudMerging][ParentChain] pRandMergedKF id = "
-              << FormatParentChainKeyFrameId(pRandMergedKF)
-              << std::endl;
-    std::cerr << "[CloudMerging][ParentChain] pRandMainKF id = "
-              << FormatParentChainKeyFrameId(pRandMainKF)
-              << std::endl;
-
-    std::cerr << "[CloudMerging][ParentChain] before SetFirstConnection, origin KF id = "
-              << FormatParentChainKeyFrameId(pMergedOriginKF)
-              << std::endl;
     if (pMergedOriginKF != nullptr) {
         pMergedOriginKF->SetFirstConnection(false);
     } else {
         std::cerr << "[CloudMerging][ParentChain][WARNING] merged map origin KF is null, skip SetFirstConnection."
                   << std::endl;
     }
-    std::cerr << "[CloudMerging][ParentChain] after SetFirstConnection" << std::endl;
 
-    std::cerr << "[CloudMerging][ParentChain] before GetParent, child KF id = "
-              << FormatParentChainKeyFrameId(pRandMergedKF)
-              << std::endl;
     pNewChild = pRandMergedKF->GetParent(); 
-    std::cerr << "[CloudMerging][ParentChain] after GetParent, pNewChild id = "
-              << FormatParentChainKeyFrameId(pNewChild)
-              << std::endl;
     pNewParent = pRandMergedKF;             
-    std::cerr << "[CloudMerging][ParentChain] before ChangeParent, child id = "
-              << FormatParentChainKeyFrameId(pRandMergedKF)
-              << ", new parent id = "
-              << FormatParentChainKeyFrameId(pRandMainKF)
-              << std::endl;
     if (pRandMergedKF != pRandMainKF) {
         pRandMergedKF->ChangeParent(pRandMainKF);
     } else {
@@ -3344,7 +3320,6 @@ void CloudMerging::CloudMergeMap(
             0);
         pNewChild = nullptr;
     }
-    std::cerr << "[CloudMerging][ParentChain] after ChangeParent" << std::endl;
 
     std::set<KeyFrame *> visitedParentChainKFs;
     size_t parentChainIteration = 0;
@@ -3355,10 +3330,6 @@ void CloudMerging::CloudMergeMap(
                   << maxParentChainIterations
                   << std::endl;
     }
-    std::cerr << "[CloudMerging][ParentChain] max_parent_chain_iterations = "
-              << maxParentChainIterations
-              << std::endl;
-
     while (pNewChild) 
     {
         parentChainIteration++;
@@ -3408,30 +3379,9 @@ void CloudMerging::CloudMergeMap(
             break;
         }
 
-        std::cerr << "[CloudMerging][ParentChain] iteration = "
-                  << parentChainIteration
-                  << ", pNewChild id = " << FormatParentChainKeyFrameId(pNewChild)
-                  << ", pNewParent id = " << FormatParentChainKeyFrameId(pNewParent)
-                  << std::endl;
-
-        std::cerr << "[CloudMerging][ParentChain] before EraseChild, child id = "
-                  << FormatParentChainKeyFrameId(pNewChild)
-                  << ", erased child id = "
-                  << FormatParentChainKeyFrameId(pNewParent)
-                  << std::endl;
         pNewChild->EraseChild(pNewParent); 
-        std::cerr << "[CloudMerging][ParentChain] after EraseChild" << std::endl;
 
-        std::cerr << "[CloudMerging][ParentChain] before GetParent in loop, child id = "
-                  << FormatParentChainKeyFrameId(pNewChild)
-                  << std::endl;
         KeyFrame *pOldParent = pNewChild->GetParent();
-        std::cerr << "[CloudMerging][ParentChain] iteration = "
-                  << parentChainIteration
-                  << ", pNewChild id = " << FormatParentChainKeyFrameId(pNewChild)
-                  << ", pNewParent id = " << FormatParentChainKeyFrameId(pNewParent)
-                  << ", pOldParent id = " << FormatParentChainKeyFrameId(pOldParent)
-                  << std::endl;
 
         if (pNewChild == pOldParent) {
             logParentChainBreak(
@@ -3462,13 +3412,7 @@ void CloudMerging::CloudMergeMap(
                       << std::endl;
         }
 
-        std::cerr << "[CloudMerging][ParentChain] before ChangeParent in loop, child id = "
-                  << FormatParentChainKeyFrameId(pNewChild)
-                  << ", new parent id = "
-                  << FormatParentChainKeyFrameId(pNewParent)
-                  << std::endl;
         pNewChild->ChangeParent(pNewParent);
-        std::cerr << "[CloudMerging][ParentChain] after ChangeParent in loop" << std::endl;
 
         if (bStopAfterCurrentChange) {
             logParentChainBreak(
@@ -3485,69 +3429,25 @@ void CloudMerging::CloudMergeMap(
         pNewChild = pOldParent;
     }
 
-    std::cerr << "[CloudMerging][ParentChain] before pRandMainKF->UpdateConnections, id = "
-              << FormatParentChainKeyFrameId(pRandMainKF)
-              << std::endl;
     pRandMainKF->UpdateConnections();
-    std::cerr << "[CloudMerging][ParentChain] after pRandMainKF->UpdateConnections" << std::endl;
 
-    std::cerr << "[CloudMerging][ParentChain] before spMergedMapWindowKFs UpdateConnections loop, size = "
-              << spMergedMapWindowKFs.size()
-              << std::endl;
-    size_t mergedWindowUpdateIndex = 0;
     for (KeyFrame *pKFi : spMergedMapWindowKFs) {
         if (!pKFi || pKFi->isBad()) {
-            std::cerr << "[CloudMerging][ParentChain] skip merged-window UpdateConnections index = "
-                      << mergedWindowUpdateIndex
-                      << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                      << std::endl;
-            mergedWindowUpdateIndex++;
             continue;
         }
 
-        std::cerr << "[CloudMerging][ParentChain] before merged-window UpdateConnections index = "
-                  << mergedWindowUpdateIndex
-                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                  << std::endl;
         pKFi->UpdateConnections();
-        std::cerr << "[CloudMerging][ParentChain] after merged-window UpdateConnections index = "
-                  << mergedWindowUpdateIndex
-                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                  << std::endl;
-        mergedWindowUpdateIndex++;
     }
-    std::cerr << "[CloudMerging][ParentChain] after spMergedMapWindowKFs UpdateConnections loop" << std::endl;
 
-    std::cerr << "[CloudMerging][ParentChain] before spMainMapWindowKFs UpdateConnections loop, size = "
-              << spMainMapWindowKFs.size()
-              << std::endl;
-    size_t mainWindowUpdateIndex = 0;
     for (KeyFrame *pKFi : spMainMapWindowKFs) {
         if (!pKFi || pKFi->isBad()) {
-            std::cerr << "[CloudMerging][ParentChain] skip main-window UpdateConnections index = "
-                      << mainWindowUpdateIndex
-                      << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                      << std::endl;
-            mainWindowUpdateIndex++;
             continue;
         }
 
-        std::cerr << "[CloudMerging][ParentChain] before main-window UpdateConnections index = "
-                  << mainWindowUpdateIndex
-                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                  << std::endl;
         pKFi->UpdateConnections();
-        std::cerr << "[CloudMerging][ParentChain] after main-window UpdateConnections index = "
-                  << mainWindowUpdateIndex
-                  << ", id = " << FormatParentChainKeyFrameId(pKFi)
-                  << std::endl;
-        mainWindowUpdateIndex++;
     }
-    std::cerr << "[CloudMerging][ParentChain] after spMainMapWindowKFs UpdateConnections loop" << std::endl;
 
-    std::cerr << "[CloudMerging][ParentChain] parent-chain rewiring finished" << std::endl;
-
-    std::cerr << "[Merge]: Start welding bundle adjustment" << std::endl;
+    // std::cerr << "[Merge]: Start welding bundle adjustment" << std::endl;
 
     bool bStop = false;
     vector<KeyFrame *> vpMergedMapWindowKFs;
@@ -3557,14 +3457,14 @@ void CloudMerging::CloudMergeMap(
     
     // 【核心修复 2：彻底切断 Welding Local Bundle Adjustment】使用参数 bOldUdf 和 bNewUdf
     if (bOldUdf || bNewUdf) {
-        std::cerr << "\033[1;32m[UDF BYPASS] Skipping Welding Local Bundle Adjustment (Visual BA is invalid for UDF).\033[0m" << std::endl;
+        // std::cerr << "\033[1;32m[UDF BYPASS] Skipping Welding Local Bundle Adjustment (Visual BA is invalid for UDF).\033[0m" << std::endl;
     } else {
         std::cerr << "[Merge]: Local bundle adjustment, spLocalWindowKFs size: " << spMergedMapWindowKFs.size() << std::endl;
         std::cerr << "[Merge]: Local bundle adjustment, spMergeConnectedKFs size: " << spMainMapWindowKFs.size() << std::endl;
         Optimizer::LocalBundleAdjustment(pRandMergedKF, vpMergedMapWindowKFs, vpMainMapKFs, &bStop);
     }
 
-    std::cerr << "[Merge]: Welding bundle adjustment finished" << std::endl;
+    // std::cerr << "[Merge]: Welding bundle adjustment finished" << std::endl;
 
     if (blockLocalMapper) {
         pLocalMapper->Release();

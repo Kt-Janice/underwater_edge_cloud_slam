@@ -12,7 +12,6 @@
 #include <fstream>
 #include <iomanip>
 #include <set>
-#include <set>
 #include <mutex>
 #include <thread>
 #include <limits> // [阶段2B修改] 前端位姿最近邻查询

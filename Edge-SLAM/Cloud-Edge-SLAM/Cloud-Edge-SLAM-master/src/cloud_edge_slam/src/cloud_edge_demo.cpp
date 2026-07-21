@@ -87,15 +87,12 @@
 #include "sensor_msgs/CameraInfo.h"
 #include "sensor_msgs/Image.h"
 //cap-udf
-#include<fstream> 
 #include "SVIn2ORBWrapper.h"
-#include <thread>
 #include <memory> // [阶段2B修改] fullStateCallback 中使用 std::shared_ptr
 
 // [新增 OS 级堆栈捕获探针头文件]
 #include <signal.h>
 #include <execinfo.h>
-#include <unistd.h>
 
 
 
@@ -451,7 +448,7 @@ namespace okvis {
         publisher->setParameters(parameters);
     
         // [阶段2B修改] fullStateCallback 不再只转发给 Publisher，同时缓存 OKVIS / SVIn2 前端连续 Twc 位姿。
-        // 该缓存供 CloudMerging 阶段2B构造“OKVIS-CloudMap 相邻运动一致性权重”。
+        // 该缓存供 CloudMerging 构造 frontend/OKVIS 与 CloudMap 的 Sim3 点对对齐。
         okvis_estimator->setFullStateCallback(
             [publisher, &parameters](const okvis::Time& t,
                                      const okvis::kinematics::Transformation& T_WS,
@@ -1541,7 +1538,7 @@ ORB_SLAM3::Map *Grabber::ROSMapToORBMap(cloud_edge_slam::CloudMapConstPtr pMap) 
     }
     long unsigned int gen_mnId = gen_start_id; 
     
-    ROS_INFO("=== [INNER PROBE 1] Parsing %zu KeyFrames ===", pMap->key_frames.size());
+    // ROS_INFO("=== [INNER PROBE 1] Parsing %zu KeyFrames ===", pMap->key_frames.size());
     for (auto &rosKeyFrame : pMap->key_frames) {
         std::vector<cv::KeyPoint> vKeyPoints;
         for (auto &rosKeyPoint : rosKeyFrame.key_points) {
@@ -1636,7 +1633,7 @@ ORB_SLAM3::Map *Grabber::ROSMapToORBMap(cloud_edge_slam::CloudMapConstPtr pMap) 
         } while(trans);
     }
 
-    ROS_INFO("=== [INNER PROBE 2] Parsing %zu MapPoints ===", pMap->map_points.size());
+    // ROS_INFO("=== [INNER PROBE 2] Parsing %zu MapPoints ===", pMap->map_points.size());
     for (auto &rosMapPoint : pMap->map_points) {
         if (rosMapPoint.ref_keyframe_id == -1) {
             vMapPoints.push_back(nullptr);
@@ -2517,7 +2514,7 @@ void Grabber::UploadLostImages(LostUploadRequest request) {
             msg->format = "jpeg";
             std::vector<int> params; 
             params.push_back(cv::IMWRITE_JPEG_QUALITY); 
-            params.push_back(90); 
+            params.push_back(100); 
             cv::imencode(".jpg", image.img, msg->data, params);
             msgs_buffer[i] = msg;
         }
