@@ -186,6 +186,7 @@ include_directories(
 add_library(${PROJECT_NAME}_lib SHARED
   lib_src/RuntimeEnvironment.cc
   lib_src/CloudMergeTicket.cc
+  lib_src/CloudUploadTransactionGate.cc
   lib_src/BackendWriteController.cc
   lib_src/System.cc
   lib_src/Tracking.cc
@@ -376,6 +377,11 @@ endif()
 catkin_add_gtest(test_cloud_merge_ticket test/test_cloud_merge_ticket.cpp)
 if(TARGET test_cloud_merge_ticket)
   target_link_libraries(test_cloud_merge_ticket gtest_main ${PROJECT_NAME}_lib)
+endif()
+
+catkin_add_gtest(test_cloud_upload_transaction_gate test/test_cloud_upload_transaction_gate.cpp)
+if(TARGET test_cloud_upload_transaction_gate)
+  target_link_libraries(test_cloud_upload_transaction_gate gtest_main ${PROJECT_NAME}_lib)
 endif()
 
 ## Add folders to be run by python nosetests
