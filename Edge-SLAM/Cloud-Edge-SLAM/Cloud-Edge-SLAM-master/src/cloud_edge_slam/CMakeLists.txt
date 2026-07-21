@@ -235,6 +235,16 @@ add_dependencies(cloud_edge_sla_merging_compile_check
   cloud_edge_slam_gencpp
 )
 
+# Compile the unified entry transaction core before Task 17 replaces the
+# active executable source.  This target is removed during that source switch.
+add_library(cloud_edge_sla_entry_compile_check OBJECT
+  src/cloud_edge.cpp
+)
+add_dependencies(cloud_edge_sla_entry_compile_check
+  ${catkin_EXPORTED_TARGETS}
+  cloud_edge_slam_gencpp
+)
+
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
