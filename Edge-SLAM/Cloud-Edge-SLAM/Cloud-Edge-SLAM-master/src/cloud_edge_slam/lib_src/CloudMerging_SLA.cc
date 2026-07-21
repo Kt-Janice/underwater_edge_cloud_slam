@@ -308,8 +308,11 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
 void CloudMerging::ApplyCloudMapCleanup(
     PendingCloudMap &pending,
     const CloudMapCleanupAction cleanupAction) {
-    static_cast<void>(pending);
-    static_cast<void>(cleanupAction);
+    if (cleanupAction == CloudMapCleanupAction::DELETE_CLOUD_MAP &&
+        pending.pMap != nullptr) {
+        delete pending.pMap;
+        pending.pMap = nullptr;
+    }
 }
 
 }  // namespace ORB_SLAM3
