@@ -811,6 +811,9 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
             }
 
             if (emitMarginalizedDebug) {
+#if 0
+                // 暂时关闭 MarginalizedFrameDebug 终端输出；保留完整诊断代码，
+                // 以便后续移除 #if 0/#endif 后原样恢复。时序字段和边端注入逻辑不受影响。
                 std::cout << std::fixed << std::setprecision(9)
                           << "[MarginalizedFrameDebug] sequence_id="
                           << marg_data.diagnostic_sequence_id
@@ -835,6 +838,7 @@ bool Estimator::applyMarginalizationStrategy(size_t numKeyframes,
                 std::cout << ", thread_id="
                           << std::this_thread::get_id()
                           << std::endl;
+#endif
                 marg_data.diagnostic_log_emitted_by_estimator = true;
             }
 

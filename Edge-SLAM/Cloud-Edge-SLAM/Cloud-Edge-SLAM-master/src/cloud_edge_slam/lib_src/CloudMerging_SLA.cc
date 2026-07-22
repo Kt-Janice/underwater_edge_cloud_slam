@@ -103,6 +103,61 @@ constexpr double kCloudMergeSim3MaxBoundaryGap = 0.05;
 constexpr double kCloudMergeSim3MinScale = 0.01;
 constexpr double kCloudMergeSim3MaxScale = 100.0;
 
+// 将 ticket 终态转换为稳定的终端文本，避免仅打印不可读的枚举整数。
+const char *CloudMergeOutcomeToString(const CloudMergeOutcome outcome) {
+    switch (outcome) {
+        case CloudMergeOutcome::PENDING: {
+            return "PENDING";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_COMPLETED: {
+            return "MERGED_REPLAY_COMPLETED";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_SKIPPED_LOST: {
+            return "MERGED_REPLAY_SKIPPED_LOST";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_SKIPPED_SHUTDOWN: {
+            return "MERGED_REPLAY_SKIPPED_SHUTDOWN";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_WARNING: {
+            return "MERGED_REPLAY_ABORTED_WARNING";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_LOST: {
+            return "MERGED_REPLAY_ABORTED_LOST";
+        }
+        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_SHUTDOWN: {
+            return "MERGED_REPLAY_ABORTED_SHUTDOWN";
+        }
+        case CloudMergeOutcome::MERGE_COMPLETED_LAND_AIR: {
+            return "MERGE_COMPLETED_LAND_AIR";
+        }
+        case CloudMergeOutcome::MERGE_SKIPPED_BACKEND_BLOCK: {
+            return "MERGE_SKIPPED_BACKEND_BLOCK";
+        }
+        case CloudMergeOutcome::MERGE_SKIPPED_SIM3_FAILURE: {
+            return "MERGE_SKIPPED_SIM3_FAILURE";
+        }
+        case CloudMergeOutcome::MERGE_SKIPPED_EDGE_MAP_MISSING: {
+            return "MERGE_SKIPPED_EDGE_MAP_MISSING";
+        }
+        case CloudMergeOutcome::MERGE_SKIPPED_MATCH_FAILURE: {
+            return "MERGE_SKIPPED_MATCH_FAILURE";
+        }
+        case CloudMergeOutcome::MERGE_SKIPPED_INVALID_MAP: {
+            return "MERGE_SKIPPED_INVALID_MAP";
+        }
+        case CloudMergeOutcome::PARTIAL_FAILURE_AFTER_CORRECTION: {
+            return "PARTIAL_FAILURE_AFTER_CORRECTION";
+        }
+        case CloudMergeOutcome::CANCELLED_SHUTDOWN: {
+            return "CANCELLED_SHUTDOWN";
+        }
+        case CloudMergeOutcome::FAILED_EXCEPTION: {
+            return "FAILED_EXCEPTION";
+        }
+    }
+    return "UNKNOWN_OUTCOME";
+}
+
 // [SE3基线] 统一过滤无效 CloudMap KeyFrame，避免补偿阶段触碰空指针或 bad keyframe。
 bool IsValidCloudMergeKeyFrame(KeyFrame *pKF) {
     if (pKF == nullptr) {
@@ -1589,6 +1644,31 @@ void CloudMerging::Run(const bool bOnline) {
             continue;
         }
 
+        std::uint64_t ticketSequence = 0U;
+        if (pending.pTicket != nullptr) {
+            ticketSequence = pending.pTicket->GetSequence();
+        }
+        unsigned long cloudMapId = 0U;
+        if (pending.pMap != nullptr) {
+            cloudMapId = pending.pMap->GetId();
+        }
+        const char *environmentName = "LAND_AIR";
+        if (IsSeaEnvironment(mRuntimeEnvironment)) {
+            environmentName = "SEA";
+        }
+        std::cerr << "\n\033[1;37m"
+                  << "===================== CLOUD MAP MERGE ====================="
+                  << "\033[0m\n"
+                  << "\033[1;36m[Merge start]\033[0m ticket="
+                  << ticketSequence
+                  << " | environment=" << environmentName
+                  << " | cloud_map=" << cloudMapId;
+        if (pending.pMap != nullptr) {
+            std::cerr << " | edge_front=" << pending.pMap->edgeFrontMapMnId
+                      << " | edge_back=" << pending.pMap->edgeBackMapMnId;
+        }
+        std::cerr << std::endl;
+
         {
             std::lock_guard<std::mutex> lock(mMutexFinish);
             mbRunning = true;
@@ -1632,6 +1712,14 @@ void CloudMerging::Run(const bool bOnline) {
             pending.pTicket,
             executionResult.outcome,
             executionResult.detail);
+        std::cerr << "\033[1;32m[Merge finished]\033[0m ticket="
+                  << ticketSequence
+                  << " | outcome="
+                  << CloudMergeOutcomeToString(executionResult.outcome)
+                  << " | detail=" << executionResult.detail << "\n"
+                  << "\033[1;37m"
+                  << "============================================================"
+                  << "\033[0m" << std::endl;
         {
             std::lock_guard<std::mutex> lock(mMutexFinish);
             mbRunning = false;
@@ -1694,6 +1782,11 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
                 return result;
             }
 
+            std::cerr << "[CloudMerge][SEA][1/4] 已定位边端子图："
+                      << "front=" << mpCurrentEdgeFrontMap->GetId()
+                      << "，back=" << mpCurrentEdgeBackMap->GetId()
+                      << "，开始建立 CloudMap 时间戳锚点。" << std::endl;
+
             // 【核心修复 1：弹性最近邻锚点匹配】
             double matchToleranceTime = 0.05;
             const vector<KeyFrame *> &edgeFrontMapKeyFrames = mpCurrentEdgeFrontMap->GetAllKeyFrames();
@@ -1731,6 +1824,10 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
                 result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
                 return result;
             }
+
+            std::cerr << "[CloudMerge][SEA][2/4] 时间戳锚点匹配完成：pairs="
+                      << mpEdgeFrontCloudKeyFrameMatch.size()
+                      << "，开始估计/应用 Sim3 校正。" << std::endl;
 
             // [Sim3合并实验] SIM3_ONLY 失败时不自动 fallback 到旧 two-anchor 逻辑，避免实验结果混淆。
             bool bSkipCloudMergeDueToCorrectionFailure = false;
@@ -2104,6 +2201,8 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
             // cerr << "First Merge Rand Select KF ratio: " << mEdgeFrontCloudKeyFrameRandSelectMatch.size() << " / " << mpEdgeFrontCloudKeyFrameMatch.size() << endl;
 
             // bool bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
+            std::cerr << "[CloudMerge][SEA][3/4] 执行 EdgeFront 与 CloudMap 对齐。"
+                      << std::endl;
             bool bComputeEdgeFront = false;
 
             if (bSkipCloudMergeDueToCorrectionFailure) {
@@ -2185,6 +2284,8 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
                         mpCurrentEdgeFrontMap);
                 });
 
+                std::cerr << "[CloudMerge][SEA][3/4] Sim3 校正完成，开始结构合并 EdgeFront + CloudMap。"
+                          << std::endl;
                 // Merge !!!
                 bMapMutationMayHaveOccurred = true;
                 CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf);
@@ -2582,6 +2683,8 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
                 return result;
             }
 
+            std::cerr << "[CloudMerge][SEA][4/4] 地图结构合并结束，开始 deferred replay。"
+                      << std::endl;
             SVIn2ORBWrapper::ReplayMergeDeferredOutcome replayOutcome;
             try {
                 replayOutcome =
@@ -2880,6 +2983,10 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         return result;
     }
 
+    std::cerr << "[CloudMerge][LAND_AIR][1/4] EdgeFront/CloudMap 锚点匹配完成：pairs="
+              << mpEdgeFrontCloudKeyFrameMatch.size()
+              << "，开始第一阶段 Sim3。" << std::endl;
+
     std::vector<int> vEdgeFrontMatchIndexes;
     for (const auto &match : mpEdgeFrontCloudKeyFrameMatch) {
         vEdgeFrontMatchIndexes.push_back(match.first);
@@ -2912,6 +3019,8 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
          << mEdgeFrontCloudKeyFrameRandSelectMatch.size() << " / "
          << mpEdgeFrontCloudKeyFrameMatch.size() << endl;
 
+    std::cerr << "[CloudMerge][LAND_AIR][2/4] 估计 EdgeFront → CloudMap Sim3。"
+              << std::endl;
     const bool bComputeEdgeFront = ComputeSubmapSim3(
         mpCurrentEdgeFrontMap,
         mpCurrentCloudMap,
@@ -2957,6 +3066,8 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
             mpCurrentEdgeFrontMap);
     });
 
+    std::cerr << "[CloudMerge][LAND_AIR][2/4] 第一阶段 Sim3 完成，开始合并 EdgeFront + CloudMap。"
+              << std::endl;
     bMapMutationMayHaveOccurred = true;
     CloudMergeMap(
         mpCurrentEdgeFrontMap,
@@ -3059,6 +3170,8 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
          << mpNewEdgeFrontEdgeBackKeyFrameMatch.size() << endl;
 
     const bool mbedge_merge = mbOldUdf || mbNewUdf;
+    std::cerr << "[CloudMerge][LAND_AIR][3/4] 开始估计合并后地图 → EdgeBack 的 Sim3。"
+              << std::endl;
     const bool bComputeEdgeBack = ComputeSubmapSim3(
         mpCurrentEdgeFrontMap,
         mpCurrentEdgeBackMap,
@@ -3107,6 +3220,8 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
             mpCurrentEdgeFrontMap);
     });
 
+    std::cerr << "[CloudMerge][LAND_AIR][4/4] 第二阶段 Sim3 完成，开始结构合并到 EdgeBack。"
+              << std::endl;
     CloudMergeMap(
         mpCurrentEdgeFrontMap,
         mpCurrentEdgeBackMap,
