@@ -1,19 +1,26 @@
 <launch>
-
-    <remap from="/camera/image_raw" to="/camera/rgb/image_color"/>
+    <param name="/use_sim_time" value="true" />
     <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_slam_node" required="true" > 
     
-        <!--<param name="vocabulary_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/Vocabulary/ORBvoc.txt" /> -->
-        <param name="vocabulary_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/Vocabulary/ORBvoc.bin" /> 
+        <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />
         <!--param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/icl.yaml" /> -->
         <!--param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/euroc.yaml" /> -->
         <!--param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/TUM2.yaml" />
         <param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/RealSustech.yaml" /> --> 
         <param name="data_type" value="bag" /> 
+
+        <remap from="/camera0" to="/davis_left/image_raw" />
+        <remap from="/imu" to="/davis_left/imu" />
+        <remap from="/camera/rgb/image_color" to="/davis_left/image_raw" />
+        <param name="raw_image_topic" value="/davis_left/image_raw" />
+        <param name="setting_path" value="$(find cloud_edge_slam)/config/davis.yaml" />
+        <param name="data_type" value="bag" /> 
+        <param name="data_path" value="/media/lhf/T7 Shield/Dataset/水下数据集/AquaticVision(港中深）/04_loop/data rosbag/Loop1_with_board_imu_200hz_images_20hz.bag" />
+
         <!--<param name="data_path" value="/zclin/climbot_dataset/handheld_dataset/ceiling1.bag" /> -->
         <!--param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/rgbd_dataset_freiburg1_teddy.bag" /> -->
         <!--param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/rgbd_dataset_freiburg1_room.bag" /> -->
-        <param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/cut_dataset/fr1_room.bag" />  
+        <!-- <param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/cut_dataset/fr1_room.bag" />   -->
         <!--param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/cut_dataset/fr2_p_360.bag" /> -->
         <!--<param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/birl-328.bag" /> -->
         <!--param name="data_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Dataset/TUM_dataset/cut_dataset/fr1_teddy.bag" /> -->
@@ -45,12 +52,12 @@
         <!-- <param name="data_path" value="/zclin/Euroc_dataset/MH_03_medium/rgb.txt" /> -->
         <!-- <param name="data_path" value="/zclin/Euroc_dataset/V1_03_difficult/rgb.txt" /> -->
 
-        <param name="result_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/results" />
+        <param name="result_path" value="/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/results" />
         <param name="cloud_topic_name" value="/cloud_slam" />
         
         <param name="merge_anyway" value="false" />
         <param name="cloud_online" value="true" />
-        <param name="real_online" value="true" />
+        <param name="real_online" value="false" />
         <param name="cloud_merge" value="true" />
         <param name="save_cloud_bag" value="false" />
         <param name="old_udf_cloud_edge" value="false" />
@@ -59,13 +66,17 @@
         <param name="main_loop_sleep_ms" value="30" />
         <param name="sampler_edge_front_kf_num" value="40" />
         <param name="sampler_edge_back_kf_num" value="40" />
-        <!-- 参数：是否开启keyframe culling，若为ture，将影响Merge时关联的KF数量，效果不好 -->
-        <param name="sampler_edge_front_min_time" value="1" />
-        <param name="sampler_edge_back_min_time" value="1" />
+        <param name="sampler_edge_front_min_time" value="3.0" />
+        <param name="sampler_edge_back_min_time" value="3.0" />
         <param name="sampler_pd_kp" value="0.8" />
         <param name="sampler_pd_kd" value="0.08" />
         <param name="sampler_pd_th" value="12" />
+        <param name="old_udf_cloud_edge" value="false" />
+        <param name="new_udf_cloud_edge" value="true" />
         <param name="kf_culling" value="false" />
+        <param name="stitch_trajectories" value="true" />
+    </node>
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find cloud_edge_slam)/config/rviz_svin.rviz" />
     </node>
 
 </launch>

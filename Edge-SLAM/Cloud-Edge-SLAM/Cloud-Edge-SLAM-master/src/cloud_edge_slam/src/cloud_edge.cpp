@@ -7,7 +7,67 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include "CloudMergeTicket.h"
+#include "CloudUploadTransactionGate.h"
+#include "RuntimeEnvironment.h"
+#include "System.h"
+#include "Atlas.h"
+#include "CloudImageSampler.h"
+#include "Frame.h"
+#include "KeyFrame.h"
+#include "Map.h"
+#include "MapPoint.h"
+#include "Converter.h"
+#include "ORBVocabulary.h"
+#include "SVIn2ORBWrapper.h"
 
+#include <actionlib/client/simple_action_client.h>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <opencv2/imgcodecs.hpp>
+#include <ros/ros.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
+#include <sensor_msgs/CompressedImage.h>
+#include <sensor_msgs/CameraInfo.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/image_encodings.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Int16.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <deque>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
+
+#include "cloud_edge_slam/CloudSlamAction.h"
+#include "cloud_edge_slam/Descriptor.h"
+#include "cloud_edge_slam/Evo.h"
+#include "cloud_edge_slam/KeyFrame.h"
+#include "cloud_edge_slam/KeyPoint.h"
+#include "cloud_edge_slam/MapPoint.h"
+#include "cloud_edge_slam/Observation.h"
+#include "cloud_edge_slam/Sequence.h"
+
+#include <okvis/Publisher.hpp>
+#include <okvis/RosParametersReader.hpp>
+#include <okvis/Subscriber.hpp>
+#include <okvis/ThreadedKFVio.hpp>
 namespace cloud_edge_slam_sla {
 
 struct UploadLifecycleState {
@@ -310,67 +370,6 @@ TicketBatchResult<Result> WaitForTicketBatch(
 
 #ifndef CLOUD_EDGE_UPLOAD_LIFECYCLE_ONLY
 
-#include "CloudMergeTicket.h"
-#include "CloudUploadTransactionGate.h"
-#include "RuntimeEnvironment.h"
-#include "System.h"
-#include "Atlas.h"
-#include "CloudImageSampler.h"
-#include "Frame.h"
-#include "KeyFrame.h"
-#include "Map.h"
-#include "MapPoint.h"
-#include "Converter.h"
-#include "ORBVocabulary.h"
-#include "SVIn2ORBWrapper.h"
-
-#include <actionlib/client/simple_action_client.h>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <cv_bridge/cv_bridge.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <opencv2/imgcodecs.hpp>
-#include <ros/ros.h>
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
-#include <sensor_msgs/CompressedImage.h>
-#include <sensor_msgs/CameraInfo.h>
-#include <sensor_msgs/Image.h>
-#include <sensor_msgs/image_encodings.h>
-#include <std_msgs/Float32.h>
-#include <std_msgs/Int16.h>
-
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
-#include <deque>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <sys/stat.h>
-#include <thread>
-#include <unistd.h>
-
-#include "cloud_edge_slam/CloudSlamAction.h"
-#include "cloud_edge_slam/Descriptor.h"
-#include "cloud_edge_slam/Evo.h"
-#include "cloud_edge_slam/KeyFrame.h"
-#include "cloud_edge_slam/KeyPoint.h"
-#include "cloud_edge_slam/MapPoint.h"
-#include "cloud_edge_slam/Observation.h"
-#include "cloud_edge_slam/Sequence.h"
-
-#include <okvis/Publisher.hpp>
-#include <okvis/RosParametersReader.hpp>
-#include <okvis/Subscriber.hpp>
-#include <okvis/ThreadedKFVio.hpp>
 
 extern SVIn2ORBWrapper *pSVIn2ORBWrapper;
 
