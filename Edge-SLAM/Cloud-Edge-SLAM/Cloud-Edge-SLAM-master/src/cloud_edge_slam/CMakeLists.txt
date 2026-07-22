@@ -236,8 +236,13 @@ add_library(${PROJECT_NAME}_lib SHARED
 ## The recommended prefix ensures that target names across packages don't collide
 # add_executable(${PROJECT_NAME}_node src/cloud_edge_slam_node.cpp)
 
-add_executable(${PROJECT_NAME}_node src/cloud_edge.cpp)
-add_dependencies(${PROJECT_NAME}_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
+add_executable(cloud_edge_slam_node src/cloud_edge_main.cpp)
+add_executable(cloud_edge_demo_node src/cloud_edge_demo.cpp)
+add_executable(cloud_edge_node src/cloud_edge.cpp)
+
+add_dependencies(cloud_edge_slam_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
+add_dependencies(cloud_edge_demo_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
+add_dependencies(cloud_edge_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_gencpp)
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the
@@ -267,7 +272,27 @@ target_link_libraries(${PROJECT_NAME}_lib
 
 set(OKVIS_LIB_PATH "/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/devel/lib")
 
-target_link_libraries(${PROJECT_NAME}_node
+target_link_libraries(cloud_edge_slam_node
+  ${PROJECT_NAME}_lib
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(cloud_edge_demo_node
+  ${PROJECT_NAME}_lib
+  ${catkin_LIBRARIES}
+  ${OKVIS_LIB_PATH}/libokvis_ros.a
+  ${OKVIS_LIB_PATH}/libokvis_multisensor_processing.a
+  ${OKVIS_LIB_PATH}/libokvis_frontend.a
+  ${OKVIS_LIB_PATH}/libokvis_matcher.a
+  ${OKVIS_LIB_PATH}/libokvis_ceres.a
+  ${OKVIS_LIB_PATH}/libokvis_kinematics.a
+  ${OKVIS_LIB_PATH}/libokvis_common.a
+  ${OKVIS_LIB_PATH}/libokvis_cv.a
+  ${OKVIS_LIB_PATH}/libokvis_time.a
+  ${OKVIS_LIB_PATH}/libokvis_util.a
+)
+
+target_link_libraries(cloud_edge_node
   ${PROJECT_NAME}_lib
   ${catkin_LIBRARIES}
   ${OKVIS_LIB_PATH}/libokvis_ros.a
