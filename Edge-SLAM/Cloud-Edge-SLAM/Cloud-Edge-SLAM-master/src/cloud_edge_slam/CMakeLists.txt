@@ -147,7 +147,6 @@ generate_messages(
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
  INCLUDE_DIRS include ${PROJECT_SOURCE_DIR}
- LIBRARIES cloud_edge_slam
  CATKIN_DEPENDS cv_bridge geometry_msgs message_generation roscpp rospy sensor_msgs std_msgs
 #  DEPENDS system_lib
 )
@@ -184,18 +183,15 @@ include_directories(
   /home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/okvis_ros/okvis/okvis_cameras/include
 )
 
-## Declare a C++ library
-add_library(${PROJECT_NAME}_lib SHARED
+set(CLOUD_EDGE_COMMON_SOURCES
   lib_src/RuntimeEnvironment.cc
   lib_src/CloudMergeTicket.cc
   lib_src/CloudUploadTransactionGate.cc
   lib_src/BackendWriteController.cc
-  lib_src/System.cc
   lib_src/Tracking.cc
   lib_src/LocalMapping.cc
   lib_src/LoopClosing.cc
-  lib_src/CloudMerging_SLA.cc
-  src/SVIn2ORBWrapper.cpp # [阶段2B修改] CloudMerging.cc 需要访问 SVIn2ORBWrapper 的前端位姿缓存。
+  src/SVIn2ORBWrapper.cpp
   lib_src/CloudImageSampler.cc
   lib_src/KFDSample.cc
   lib_src/ORBextractor.cc
@@ -223,13 +219,85 @@ add_library(${PROJECT_NAME}_lib SHARED
   lib_src/TwoViewReconstruction.cc
   lib_src/Config.cc
   lib_src/Settings.cc
-
 )
 
-## Add cmake target dependencies of the library
-## as an example, code may need to be generated before libraries
-## either from message generation or dynamic reconfigure
-# add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_library(cloud_edge_common_obj OBJECT
+  ${CLOUD_EDGE_COMMON_SOURCES}
+)
+set_target_properties(cloud_edge_common_obj PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+add_dependencies(cloud_edge_common_obj
+  ${catkin_EXPORTED_TARGETS}
+  cloud_edge_slam_gencpp
+)
+
+add_library(cloud_edge_sla_lib SHARED
+  lib_src/System.cc
+  lib_src/CloudMergingFactory.cc
+  lib_src/CloudMerging_SLA.cc
+  $<TARGET_OBJECTS:cloud_edge_common_obj>
+)
+
+add_library(cloud_edge_sea_legacy_lib SHARED
+  lib_src/System.cc
+  lib_src/CloudMergingFactory.cc
+  lib_src/CloudMerging.cc
+  lib_src/CloudMergingLegacyCompatibility.cc
+  $<TARGET_OBJECTS:cloud_edge_common_obj>
+)
+
+add_library(cloud_edge_land_air_legacy_lib SHARED
+  lib_src/System.cc
+  lib_src/CloudMergingFactory.cc
+  lib_src/CloudMerging_old.cc
+  lib_src/CloudMergingLegacyCompatibility.cc
+  $<TARGET_OBJECTS:cloud_edge_common_obj>
+)
+
+target_compile_definitions(cloud_edge_sla_lib
+  PRIVATE CLOUD_EDGE_MERGER_SLA
+)
+target_compile_definitions(cloud_edge_sea_legacy_lib
+  PRIVATE CLOUD_EDGE_MERGER_SEA_LEGACY
+)
+target_compile_definitions(cloud_edge_land_air_legacy_lib
+  PRIVATE CLOUD_EDGE_MERGER_LAND_AIR_LEGACY
+)
+
+set(CLOUD_EDGE_FINAL_LIBRARIES
+  cloud_edge_sla_lib
+  cloud_edge_sea_legacy_lib
+  cloud_edge_land_air_legacy_lib
+)
+
+foreach(CLOUD_EDGE_FINAL_LIBRARY ${CLOUD_EDGE_FINAL_LIBRARIES})
+  add_dependencies(${CLOUD_EDGE_FINAL_LIBRARY}
+    ${catkin_EXPORTED_TARGETS}
+    cloud_edge_slam_gencpp
+  )
+  target_link_libraries(${CLOUD_EDGE_FINAL_LIBRARY}
+    ${OpenCV_LIBS}
+    ${EIGEN3_LIBS}
+    ${Pangolin_LIBRARIES}
+    ${PCL_LIBRARIES}
+    ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
+    ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.a
+    -lboost_serialization
+    -lcrypto
+    ${catkin_LIBRARIES}
+  )
+endforeach()
+
+set_target_properties(cloud_edge_sla_lib PROPERTIES
+  LINK_FLAGS "-Wl,-z,defs -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_sla_lib.link.map"
+)
+set_target_properties(cloud_edge_sea_legacy_lib PROPERTIES
+  LINK_FLAGS "-Wl,-z,defs -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_sea_legacy_lib.link.map"
+)
+set_target_properties(cloud_edge_land_air_legacy_lib PROPERTIES
+  LINK_FLAGS "-Wl,-z,defs -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_land_air_legacy_lib.link.map"
+)
 
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
@@ -254,31 +322,15 @@ add_dependencies(cloud_edge_node ${catkin_EXPORTED_TARGETS} cloud_edge_slam_genc
 ## same as for the library above
 # add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
-## Specify libraries to link a library or executable target against
-# target_link_libraries(${PROJECT_NAME}_node
-#   ${catkin_LIBRARIES}
-# )
-target_link_libraries(${PROJECT_NAME}_lib
-  ${OpenCV_LIBS}
-  ${EIGEN3_LIBS}
-  ${Pangolin_LIBRARIES}
-  ${PCL_LIBRARIES} #cap
-  ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
-  ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.a
-  -lboost_serialization
-  -lcrypto
-  ${catkin_LIBRARIES}
-)
-
 set(OKVIS_LIB_PATH "/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/devel/lib")
 
 target_link_libraries(cloud_edge_slam_node
-  ${PROJECT_NAME}_lib
+  cloud_edge_land_air_legacy_lib
   ${catkin_LIBRARIES}
 )
 
 target_link_libraries(cloud_edge_demo_node
-  ${PROJECT_NAME}_lib
+  cloud_edge_sea_legacy_lib
   ${catkin_LIBRARIES}
   ${OKVIS_LIB_PATH}/libokvis_ros.a
   ${OKVIS_LIB_PATH}/libokvis_multisensor_processing.a
@@ -293,7 +345,7 @@ target_link_libraries(cloud_edge_demo_node
 )
 
 target_link_libraries(cloud_edge_node
-  ${PROJECT_NAME}_lib
+  cloud_edge_sla_lib
   ${catkin_LIBRARIES}
   ${OKVIS_LIB_PATH}/libokvis_ros.a
   ${OKVIS_LIB_PATH}/libokvis_multisensor_processing.a
@@ -355,22 +407,27 @@ target_link_libraries(cloud_edge_node
 ## Add gtest based cpp test target and link libraries
 catkin_add_gtest(test_runtime_environment test/test_runtime_environment.cpp)
 if(TARGET test_runtime_environment)
-  target_link_libraries(test_runtime_environment gtest_main ${PROJECT_NAME}_lib)
+  target_link_libraries(test_runtime_environment gtest_main cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_cloud_merge_ticket test/test_cloud_merge_ticket.cpp)
 if(TARGET test_cloud_merge_ticket)
-  target_link_libraries(test_cloud_merge_ticket gtest_main ${PROJECT_NAME}_lib)
+  target_link_libraries(test_cloud_merge_ticket gtest_main cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_cloud_upload_transaction_gate test/test_cloud_upload_transaction_gate.cpp)
 if(TARGET test_cloud_upload_transaction_gate)
-  target_link_libraries(test_cloud_upload_transaction_gate gtest_main ${PROJECT_NAME}_lib)
+  target_link_libraries(test_cloud_upload_transaction_gate gtest_main cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_cloud_upload_lifecycle test/test_cloud_upload_lifecycle.cpp)
 if(TARGET test_cloud_upload_lifecycle)
   target_link_libraries(test_cloud_upload_lifecycle gtest_main)
+endif()
+
+catkin_add_gtest(test_cloud_merging_factory test/test_cloud_merging_factory.cpp)
+if(TARGET test_cloud_merging_factory)
+  target_link_libraries(test_cloud_merging_factory gtest_main cloud_edge_sla_lib)
 endif()
 
 ## Add folders to be run by python nosetests

@@ -7,6 +7,9 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+
+#ifndef CLOUD_EDGE_UPLOAD_LIFECYCLE_ONLY
+
 #include "CloudMergeTicket.h"
 #include "CloudUploadTransactionGate.h"
 #include "RuntimeEnvironment.h"
@@ -68,6 +71,9 @@
 #include <okvis/RosParametersReader.hpp>
 #include <okvis/Subscriber.hpp>
 #include <okvis/ThreadedKFVio.hpp>
+
+#endif  // CLOUD_EDGE_UPLOAD_LIFECYCLE_ONLY
+
 namespace cloud_edge_slam_sla {
 
 struct UploadLifecycleState {

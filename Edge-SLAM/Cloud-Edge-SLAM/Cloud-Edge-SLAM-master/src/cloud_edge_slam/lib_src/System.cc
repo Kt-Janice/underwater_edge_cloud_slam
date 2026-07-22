@@ -17,6 +17,7 @@
 */
 
 #include "System.h"
+#include "CloudMergingFactory.h"
 #include "CloudImageSampler.h"
 #include "Converter.h"
 #include "KFDSample.h"
@@ -45,7 +46,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
              bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum,
              nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd,
              samplerPDth, bOldUdf, bNewUdf, initFr, strSequence,
-             RuntimeEnvironment::LAND) {
+             GetFactoryDefaultRuntimeEnvironment()) {
 }
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
@@ -219,7 +220,21 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC); // mSensor!=MONOCULAR);
     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
 
-    mpCloudMerger = new CloudMerging(this, mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor != MONOCULAR, activeLC, bCloudMerge, bMergeAnyway, mpMapDrawer, mpFrameDrawer, bOldUdf, bNewUdf, mRuntimeEnvironment); //合并线程初始化
+    CloudMergingFactoryArguments cloudMergingArguments;
+    cloudMergingArguments.pSystem = this;
+    cloudMergingArguments.pAtlas = mpAtlas;
+    cloudMergingArguments.pDatabase = mpKeyFrameDatabase;
+    cloudMergingArguments.pVocabulary = mpVocabulary;
+    cloudMergingArguments.fixScale = mSensor != MONOCULAR;
+    cloudMergingArguments.activeLoopClosing = activeLC;
+    cloudMergingArguments.cloudMergeEnabled = bCloudMerge;
+    cloudMergingArguments.mergeAnyway = bMergeAnyway;
+    cloudMergingArguments.pMapDrawer = mpMapDrawer;
+    cloudMergingArguments.pFrameDrawer = mpFrameDrawer;
+    cloudMergingArguments.oldUdf = bOldUdf;
+    cloudMergingArguments.newUdf = bNewUdf;
+    cloudMergingArguments.runtimeEnvironment = mRuntimeEnvironment;
+    mpCloudMerger = CreateCloudMerging(cloudMergingArguments); //合并线程初始化
     mptCloudMerging = new thread(&ORB_SLAM3::CloudMerging::Run, mpCloudMerger, bCloudOnline); 
 
     //Set pointers between threads

@@ -70,6 +70,14 @@ public:
         RuntimeEnvironment runtimeEnvironment
     );
 
+    CloudMerging(
+        Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc,
+        const bool bFixScale, const bool bActiveLC,
+        const bool bWork, const bool bMergeAnyway,
+        MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer,
+        const bool bOldUdf, const bool bNewUdf
+    );
+
     void SetTracker(Tracking *pTracker);
     void SetLocalMapper(LocalMapping *pLocalMapper);
     void SetLoopClosing(LoopClosing *pLoopClosing);
@@ -156,6 +164,13 @@ protected:
         g2o::Sim3 gSwMainMerged,
         const std::map<int, int> &pMainMergedKeyFrameMatch,
         std::map<KeyFrame *, std::vector<std::pair<int, int>>> &vpMainMergedMapPointsMatch,
+        LocalMapping *pLocalMapper, bool blockLocalMapper);
+
+    static void CloudMergeMap(
+        Map *pMainMap, Map *pMergedMap,
+        g2o::Sim3 gSwMainMerged,
+        const std::map<int, int> &pMainMergedKeyFrameMatch,
+        std::map<KeyFrame *, std::vector<std::pair<int, int>>> &vpMainMergedMapPointsMatch,
         LocalMapping *pLocalMapper, bool blockLocalMapper, 
         bool bOldUdf, bool bNewUdf); 
 
@@ -176,7 +191,7 @@ protected:
 
     Atlas *mpAtlas;
     Tracking *mpTracker;
-    System *mpSystem;
+    System *mpSystem = nullptr;
 
     KeyFrameDatabase *mpKeyFrameDB;
     ORBVocabulary *mpORBVocabulary;

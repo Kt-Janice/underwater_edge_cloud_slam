@@ -8,7 +8,6 @@
         <!--param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/TUM2.yaml" />
         <param name="setting_path" value="/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/config/RealSustech.yaml" /> --> 
         <param name="data_type" value="bag" /> 
-
         <remap from="/camera0" to="/davis_left/image_raw" />
         <remap from="/imu" to="/davis_left/imu" />
         <remap from="/camera/rgb/image_color" to="/davis_left/image_raw" />
@@ -77,6 +76,5 @@
         <param name="stitch_trajectories" value="true" />
     </node>
     <node name="rviz" pkg="rviz" type="rviz" args="-d $(find cloud_edge_slam)/config/rviz_svin.rviz" />
-    </node>
 
 </launch>
