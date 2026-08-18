@@ -61,3 +61,9 @@ qtcreator-*
 CATKIN_IGNORE
 
 /results
+
+# Runtime bags produced by local cloud-transfer tests.
+/trans_bag/
+/trans_others/
+/trans_point/
+/trans_pth/
