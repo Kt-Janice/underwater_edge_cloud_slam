@@ -422,6 +422,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         exit(-1);
     }
 
+    mnTrackMonocularInputCount.fetch_add(1, std::memory_order_relaxed);
     cv::Mat imToFeed = im.clone();//克隆
     if (settings_ && settings_->needToResize()) {
         cv::Mat resizedIm;
@@ -1660,6 +1661,10 @@ CloudMerging *System::GetCloudMerger() {
 
 RuntimeEnvironment System::GetRuntimeEnvironment() const {
     return mRuntimeEnvironment;
+}
+
+std::uint64_t System::GetTrackMonocularInputCount() const {
+    return mnTrackMonocularInputCount.load(std::memory_order_relaxed);
 }
 
 CloudImageSampler *System::GetCloudImageSampler() {

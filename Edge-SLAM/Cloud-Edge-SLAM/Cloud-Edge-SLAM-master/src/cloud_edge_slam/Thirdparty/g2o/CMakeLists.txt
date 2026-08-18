@@ -2,9 +2,9 @@ CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 SET(CMAKE_LEGACY_CYGWIN_WIN32 0)
 
 PROJECT(g2o)
-add_definitions(-DEIGEN_DONT_VECTORIZE)
 add_definitions(-DEIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT)
-# 将原来的 -O3 替换为 -O0
+# Keep g2o's Eigen ABI aligned with the default vectorized Eigen ABI used by
+# Cloud-Edge SLAM and OKVIS.
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=native")
 SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -g -Wfatal-errors -Wall -Wextra -fno-omit-frame-pointer -march=native")

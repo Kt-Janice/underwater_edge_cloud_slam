@@ -1,0 +1,101 @@
+%YAML:1.0
+
+File.version: "1.0"
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters - monocular left camera
+# Source: camera_left.yaml
+#--------------------------------------------------------------------------------------------
+
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV)
+Camera1.fx: 4.250258563372763e+02
+Camera1.fy: 4.267976260903337e+02
+Camera1.cx: 3.860151866550880e+02
+Camera1.cy: 2.419130336743440e+02
+
+Camera1.k1: -0.288105327549552
+Camera1.k2: 0.074578284234601
+Camera1.p1: 7.784489598138802e-04
+Camera1.p2: -2.277853975035461e-04
+
+# Camera resolution
+Camera.width: 752
+Camera.height: 480
+
+# Camera frames per second
+# camera_left.yaml does not provide FPS; retain the value from the original eee.yaml.
+Camera.fps: 20
+
+# Color order of the images (0: BGR, 1: RGB. Ignored if grayscale)
+Camera.RGB: 1
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters
+# Sources: camera_left.yaml + imu_v100.yaml
+#--------------------------------------------------------------------------------------------
+
+# Transformation from camera frame to body/IMU frame.
+# camera_left.yaml provides T_Body_Cam, while imu_v100.yaml sets T_Body_Imu = I.
+# Therefore Body and IMU frames coincide and IMU.T_b_c1 = T_Body_Cam.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [ 0.02183084, -0.01312053,  0.99967558,  0.00552943,
+           0.99975965,  0.00230088, -0.02180248, -0.12431302,
+          -0.00201407,  0.99991127,  0.01316761,  0.01614686,
+           0.00000000,  0.00000000,  0.00000000,  1.00000000 ]
+
+# IMU noise parameters
+# accel_std -> IMU.NoiseAcc
+# accel_rw  -> IMU.AccWalk
+# gyro_std  -> IMU.NoiseGyro
+# The final duplicated "gyro_std" entry in imu_v100.yaml is interpreted as gyro random walk
+# according to its accompanying comment.
+IMU.NoiseGyro: 0.00367396706572
+IMU.NoiseAcc: 0.0365432018302
+IMU.GyroWalk: 2.66e-05
+IMU.AccWalk: 0.000433
+
+# imu_v100.yaml does not explicitly contain an update-rate field.
+# Use 100 Hz according to the imu_v100 dataset/config naming; verify against timestamps if needed.
+IMU.Frequency: 100.0
+
+# camera_left.yaml contains:
+# t_shift = -0.0199575325817 s, where t_imu = t_cam + t_shift.
+# ORB-SLAM3's standard settings YAML does not consume a camera/IMU time-shift parameter.
+# Apply this offset in the dataset/ROS timestamp synchronization layer if required.
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: FAST thresholds
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

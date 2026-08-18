@@ -1,3 +1,6 @@
+#ifndef CLOUD_EDGE_SLAM_PD_HPP
+#define CLOUD_EDGE_SLAM_PD_HPP
+
 /// Standard PD (proportional, derivative) controller. Derivative
 /// component is filtered using an exponential moving average filter.
 class PD {
@@ -38,6 +41,10 @@ class PD {
         return output;
     }
 
+    void Reset() {
+        prevInput = 0.0F;
+    }
+
     void setKp(float kp) { this->kp = kp; }               ///< Proportional gain
     void setKd(float kd) { this->kd = kd; } ///< Derivative gain
 
@@ -70,3 +77,5 @@ class PD {
     float setpoint = 0;      ///< Position reference.
     float Alpha = 1;
 };
+
+#endif

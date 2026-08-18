@@ -4,6 +4,9 @@
 #include <opencv2/imgproc/imgproc_c.h>
 #include <opencv2/imgproc/types_c.h>
 
+#include <cmath>
+#include <limits>
+
 KFDSample::KFDSample(int nfeatures, int nlevels, int iniThFAST, int minThFAST, float scaleFactor, Mat &Frame, float TimeStamp) {
     // Initialize
     this->nfeatures = nfeatures;
@@ -172,6 +175,214 @@ bool KFDSample::Step(const Mat &inputIm, double timeStamp) {
     this->good_old.clear();
 
     return result;
+}
+
+bool KFDSample::IsValidLandAirImage(const Mat &image) const {
+    if (image.empty()) {
+        return false;
+    }
+
+    if (image.type() == CV_8UC1 || image.type() == CV_8UC3) {
+        return true;
+    }
+
+    return false;
+}
+
+bool KFDSample::AreFiniteLandAirPoints(const vector<Point2f> &points) const {
+    for (const Point2f &point : points) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool KFDSample::BuildLandAirBaseline(const Mat &image, double timeStamp) {
+    if (!IsValidLandAirImage(image) || !std::isfinite(timeStamp)) {
+        return false;
+    }
+
+    Mat gray;
+    if (image.type() == CV_8UC3) {
+        cvtColor(image, gray, COLOR_BGR2GRAY);
+    } else {
+        gray = image.clone();
+    }
+
+    if (gray.empty() || gray.type() != CV_8UC1) {
+        return false;
+    }
+
+    ltframe = timeStamp;
+    frame1 = gray.clone();
+    imprvs = gray.clone();
+    frame2.release();
+    imnext.release();
+    next.clear();
+    status.clear();
+    err.clear();
+    good_old.clear();
+    good_next.clear();
+    try {
+        mpORBextractor->operator()(imprvs, cv::Mat(), mvKeys, mDescriptors, vLapping);
+        KeyPoint::convert(mvKeys, old);
+    } catch (const std::exception &) {
+        ResetLandAirEpisode();
+        return false;
+    }
+    if (old.empty()) {
+        ResetLandAirEpisode();
+        return false;
+    }
+    KFset.push_back(frame1);
+
+    if (show) {
+        Mat keypoints;
+        drawKeypoints(imprvs, mvKeys, keypoints, Scalar::all(-1), DrawMatchesFlags::DEFAULT);
+        imshow("ORB Feature", keypoints);
+        waitKey(10);
+    }
+
+    return true;
+}
+
+void KFDSample::ResetLandAirEpisode() {
+    old.clear();
+    next.clear();
+    good_old.clear();
+    good_next.clear();
+    status.clear();
+    err.clear();
+    mvKeys.clear();
+    mDescriptors.release();
+    frame1.release();
+    frame2.release();
+    imprvs.release();
+    imnext.release();
+    ltframe = std::numeric_limits<double>::quiet_NaN();
+    moptf = 0.0F;
+
+    if (mpPDcontroller != nullptr) {
+        mpPDcontroller->Reset();
+    }
+}
+
+bool KFDSample::StepForLandAir(const Mat &inputIm, double timeStamp, bool *pAccepted) {
+    if (pAccepted != nullptr) {
+        *pAccepted = false;
+    }
+
+    ++mnLandAirStepCallCount;
+
+    if (!IsValidLandAirImage(inputIm) || !std::isfinite(timeStamp)) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    Mat image;
+    if (inputIm.type() == CV_8UC3) {
+        cvtColor(inputIm, image, COLOR_BGR2GRAY);
+    } else {
+        image = inputIm.clone();
+    }
+
+    if (image.empty() || image.type() != CV_8UC1) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    if (old.empty()) {
+        const bool selected = BuildLandAirBaseline(image, timeStamp);
+        if (selected && pAccepted != nullptr) {
+            *pAccepted = true;
+        }
+        return selected;
+    }
+
+    if (imprvs.empty() || imprvs.size() != image.size() || imprvs.type() != image.type() ||
+        !std::isfinite(ltframe) || timeStamp <= ltframe || !AreFiniteLandAirPoints(old)) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    SetNextFrame(image);
+    if (imnext.empty() || imnext.size() != imprvs.size() || imnext.type() != imprvs.type()) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    try {
+        ++mnLandAirLkCallCount;
+        calcOpticalFlowPyrLK(imprvs, imnext, old, next, status, err, Size(31, 31), 2, criteria);
+    } catch (const cv::Exception &) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    if (next.size() != old.size() || status.size() != old.size() || err.size() != old.size() ||
+        !AreFiniteLandAirPoints(next)) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    good_old.clear();
+    good_next.clear();
+    SelectGoodPts();
+    if (good_old.empty() || good_next.empty() || good_old.size() != good_next.size()) {
+        ResetLandAirEpisode();
+        return false;
+    }
+
+    const float pointCount = static_cast<float>(good_next.size());
+    moptf = Calmoptflmag(good_old, good_next, pointCount);
+    const float controllerOutput = mpPDcontroller->update(moptf, timeStamp - ltframe);
+    const float selectionThreshold = moptf + controllerOutput;
+    bool selected = false;
+
+    if (moptf > selectionThreshold) {
+        try {
+            mpORBextractor->operator()(imnext, cv::Mat(), mvKeys, mDescriptors, vLapping);
+            KeyPoint::convert(mvKeys, old);
+        } catch (const std::exception &) {
+            ResetLandAirEpisode();
+            return false;
+        }
+        if (old.empty()) {
+            ResetLandAirEpisode();
+            return false;
+        }
+        KFset.push_back(frame2);
+        selected = true;
+        if (show) {
+            vector<KeyPoint> keys;
+            Mat keypoints;
+            KeyPoint::convert(good_next, keys);
+            drawKeypoints(imnext, keys, keypoints, Scalar::all(-1), DrawMatchesFlags::DEFAULT);
+            imshow("ORB Keypoints", keypoints);
+            waitKey(10);
+        }
+    } else {
+        old = next;
+    }
+
+    ltframe = timeStamp;
+    imprvs = imnext.clone();
+    good_next.clear();
+    good_old.clear();
+    if (pAccepted != nullptr) {
+        *pAccepted = true;
+    }
+
+    return selected;
+}
+
+std::uint64_t KFDSample::GetLandAirStepCallCount() const {
+    return mnLandAirStepCallCount;
+}
+
+std::uint64_t KFDSample::GetLandAirLkCallCount() const {
+    return mnLandAirLkCallCount;
 }
 
 //print PD

@@ -12,6 +12,7 @@
 
 #include "CloudMergeTicket.h"
 #include "CloudUploadTransactionGate.h"
+#include "RosImageInput.h"
 #include "RuntimeEnvironment.h"
 #include "System.h"
 #include "Atlas.h"
@@ -39,6 +40,7 @@
 #include <sensor_msgs/image_encodings.h>
 #include <std_msgs/Float32.h>
 #include <std_msgs/Int16.h>
+#include <topic_tools/shape_shifter.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1036,7 +1038,11 @@ struct RuntimeConfig {
     std::string dataType;
     std::string dataPath;
     std::string resultPath;
-    // land/air ROS 图像订阅话题；sea 同时作为原始图像缓存话题。
+    // land/air ROS tracking 图像订阅话题。
+    std::string imageTopic;
+    // 结果目录使用的数据集名称；ros 模式不依赖 dataPath。
+    std::string datasetName;
+    // sea 原始图像缓存话题；同时保留给 legacy RunBag 路径。
     std::string rawImageTopic = "/camera/rgb/image_color";
     // 云图合并、云端连接和本地调试行为开关。
     bool cloudMerge = true;
@@ -1046,6 +1052,8 @@ struct RuntimeConfig {
     bool cloudOnline = true;
     bool waitCloudResult = true;
     bool keyFrameCulling = false;
+    // Viewer 默认开启；无图形显示的诊断/部署环境可显式关闭。
+    bool useViewer = true;
     bool oldUdf = false;
     bool newUdf = false;
     // 主循环额外睡眠，单位毫秒；0 表示不额外限速。
@@ -1070,7 +1078,6 @@ RuntimeConfig LoadRuntimeConfig(ros::NodeHandle &nodeHandle) {
     RequireRosParameter(nodeHandle, "vocabulary_path", config.vocabularyPath);
     RequireRosParameter(nodeHandle, "setting_path", config.settingPath);
     RequireRosParameter(nodeHandle, "data_type", config.dataType);
-    RequireRosParameter(nodeHandle, "data_path", config.dataPath);
     RequireRosParameter(nodeHandle, "result_path", config.resultPath);
     RequireRosParameter(nodeHandle, "cloud_merge", config.cloudMerge);
     RequireRosParameter(nodeHandle, "save_cloud_bag", config.saveCloudBag);
@@ -1080,6 +1087,7 @@ RuntimeConfig LoadRuntimeConfig(ros::NodeHandle &nodeHandle) {
     RequireRosParameter(nodeHandle, "wait_cloud_result", config.waitCloudResult);
     RequireRosParameter(nodeHandle, "main_loop_sleep_ms", config.mainLoopSleepMs);
     RequireRosParameter(nodeHandle, "kf_culling", config.keyFrameCulling);
+    nodeHandle.param("use_viewer", config.useViewer, true);
     RequireRosParameter(nodeHandle, "old_udf_cloud_edge", config.oldUdf);
     RequireRosParameter(nodeHandle, "new_udf_cloud_edge", config.newUdf);
     RequireRosParameter(
@@ -1104,11 +1112,48 @@ RuntimeConfig LoadRuntimeConfig(ros::NodeHandle &nodeHandle) {
         nodeHandle,
         "sampler_pd_th",
         config.samplerPdThreshold);
-    nodeHandle.param<std::string>(
+    const bool rawImageTopicProvided = nodeHandle.getParam(
         "raw_image_topic",
-        config.rawImageTopic,
-        "/camera/rgb/image_color");
-    return config;
+        config.rawImageTopic);
+    if (!rawImageTopicProvided) {
+        config.rawImageTopic = "/camera/rgb/image_color";
+    }
+
+    if (ORB_SLAM3::IsSeaEnvironment(config.environment)) {
+        RequireRosParameter(nodeHandle, "data_path", config.dataPath);
+        return config;
+    }
+
+    if (config.dataType == "txt" || config.dataType == "bag") {
+        RequireRosParameter(nodeHandle, "data_path", config.dataPath);
+        nodeHandle.getParam("dataset_name", config.datasetName);
+        return config;
+    }
+
+    if (config.dataType == "ros") {
+        RequireRosParameter(nodeHandle, "dataset_name", config.datasetName);
+        const bool imageTopicProvided = nodeHandle.getParam(
+            "image_topic",
+            config.imageTopic);
+        if (!imageTopicProvided || config.imageTopic.empty()) {
+            if (rawImageTopicProvided && !config.rawImageTopic.empty()) {
+                config.imageTopic = config.rawImageTopic;
+                ROS_WARN(
+                    "raw_image_topic for land/air is deprecated; use "
+                    "image_topic instead");
+            } else {
+                ROS_FATAL(
+                    "LAND/AIR ros mode requires image_topic; "
+                    "raw_image_topic fallback is also unavailable");
+                throw std::runtime_error(
+                    "land/air ros mode requires image_topic");
+            }
+        }
+        return config;
+    }
+
+    throw std::runtime_error(
+        "land/air data_type must be one of: txt, bag, ros");
 }
 
 // 从 ORB 相机内参构造上传 Goal 的 CameraInfo；宽高单位为像素，intrinsics 为 3x3 K 矩阵。
@@ -1291,7 +1336,10 @@ public:
     void RunSeaRuntime(ros::NodeHandle &nodeHandle);
     void RunBag(const std::string &bagPath);
     void RunTxt(const std::string &txtPath);
-    void GrabImage(const sensor_msgs::ImageConstPtr &message);
+    void GrabRosImage(const topic_tools::ShapeShifter::ConstPtr &message);
+    void GrabRawImage(const sensor_msgs::ImageConstPtr &message);
+    void GrabCompressedImage(
+        const sensor_msgs::CompressedImageConstPtr &message);
     void TrackImage(const cv::Mat &image, double timestamp, float imageScale);
     static void LoadImages(
         const std::string &file,
@@ -1674,18 +1722,112 @@ void UnifiedGrabber::TrackImage(
     mpSLAM->ResetCloudProcessImages();
 }
 
-// ROS 图像订阅回调：转换为 OpenCV 图像后转发到 land/air TrackImage。
-void UnifiedGrabber::GrabImage(
+// ROS 泛型图像订阅回调：按真实消息类型分发到 raw 或 compressed 路径。
+void UnifiedGrabber::GrabRosImage(
+    const topic_tools::ShapeShifter::ConstPtr &message) {
+    if (message == nullptr) {
+        ROS_WARN_THROTTLE(5.0, "Received null generic ROS image message");
+        return;
+    }
+
+    const std::string &datatype = message->getDataType();
+    const RosImageMessageKind messageKind =
+        ClassifyRosImageDatatype(datatype);
+    if (messageKind == RosImageMessageKind::RAW) {
+        sensor_msgs::ImageConstPtr raw =
+            message->instantiate<sensor_msgs::Image>();
+        if (raw == nullptr) {
+            ROS_WARN_THROTTLE(
+                5.0,
+                "Failed to instantiate sensor_msgs/Image from generic "
+                "image message");
+            return;
+        }
+        ROS_INFO_ONCE("LAND/AIR ROS image datatype: sensor_msgs/Image");
+        GrabRawImage(raw);
+        return;
+    }
+
+    if (messageKind == RosImageMessageKind::COMPRESSED) {
+        sensor_msgs::CompressedImageConstPtr compressed =
+            message->instantiate<sensor_msgs::CompressedImage>();
+        if (compressed == nullptr) {
+            ROS_WARN_THROTTLE(
+                5.0,
+                "Failed to instantiate sensor_msgs/CompressedImage from "
+                "generic image message");
+            return;
+        }
+        ROS_INFO_ONCE(
+            "LAND/AIR ROS image datatype: sensor_msgs/CompressedImage");
+        GrabCompressedImage(compressed);
+        return;
+    }
+
+    ROS_WARN_THROTTLE(
+        5.0,
+        "Ignoring unsupported LAND/AIR ROS image datatype: %s",
+        datatype.c_str());
+}
+
+// ROS raw 图像订阅回调：转换为 OpenCV 图像后转发到 land/air TrackImage。
+void UnifiedGrabber::GrabRawImage(
     const sensor_msgs::ImageConstPtr &message) {
+    if (message == nullptr) {
+        ROS_WARN_THROTTLE(5.0, "Received null raw ROS image message");
+        return;
+    }
+
+    if (message->data.empty()) {
+        ROS_WARN_THROTTLE(5.0, "Received empty raw ROS image payload");
+        return;
+    }
+
     cv_bridge::CvImageConstPtr cvImage;
     try {
         cvImage = cv_bridge::toCvShare(message);
     } catch (const cv_bridge::Exception &exception) {
-        ROS_ERROR("cv_bridge exception: %s", exception.what());
+        ROS_WARN_THROTTLE(
+            5.0,
+            "cv_bridge exception while receiving LAND/AIR raw image: %s",
+            exception.what());
+        return;
+    }
+    if (cvImage == nullptr || cvImage->image.empty()) {
+        ROS_WARN_THROTTLE(
+            5.0,
+            "Received raw ROS image that converted to an empty OpenCV image");
         return;
     }
     TrackImage(
         cvImage->image,
+        message->header.stamp.toSec(),
+        mpSLAM->GetImageScale());
+}
+
+// ROS 压缩图像订阅回调：按原始通道语义解码后转发到 land/air TrackImage。
+void UnifiedGrabber::GrabCompressedImage(
+    const sensor_msgs::CompressedImageConstPtr &message) {
+    if (message == nullptr) {
+        ROS_WARN_THROTTLE(5.0, "Received null compressed ROS image message");
+        return;
+    }
+
+    if (message->data.empty()) {
+        ROS_WARN_THROTTLE(5.0, "Received empty compressed ROS image payload");
+        return;
+    }
+
+    cv::Mat image;
+    if (!DecodeCompressedImage(*message, image)) {
+        ROS_WARN_THROTTLE(
+            5.0,
+            "Failed to decode compressed LAND/AIR ROS image; dropping frame");
+        return;
+    }
+
+    TrackImage(
+        image,
         message->header.stamp.toSec(),
         mpSLAM->GetImageScale());
 }
@@ -1815,9 +1957,6 @@ void UnifiedGrabber::RunBag(const std::string &bagPath) {
 
 // 执行 land/air 路径：根据 data_type 选择 txt、bag 或实时 ROS 图像输入。
 void UnifiedGrabber::RunLandAirRuntime() {
-    if (!mConfig.cloudOnline) {
-        return;
-    }
     if (mConfig.dataType == "txt") {
         RunTxt(mConfig.dataPath);
         return;
@@ -2599,13 +2738,16 @@ private:
 // 根据 dataPath 和当前时间创建本轮结果目录。
 // active 为运行中目录，finished 为成功退出后重命名的 Full# 目录。
 OutputDirectories CreateOutputDirectories(const RuntimeConfig &config) {
-    bfs::path dataPath(config.dataPath);
-    std::string datasetName = dataPath.parent_path().filename().string();
+    std::string datasetName = config.datasetName;
     if (datasetName.empty()) {
-        datasetName = dataPath.filename().string();
-    }
-    if (datasetName.empty()) {
-        datasetName = "runtime";
+        const bfs::path dataPath(config.dataPath);
+        datasetName = dataPath.parent_path().filename().string();
+        if (datasetName.empty()) {
+            datasetName = dataPath.filename().string();
+        }
+        if (datasetName.empty()) {
+            datasetName = "runtime";
+        }
     }
 
     const std::time_t now = std::chrono::system_clock::to_time_t(
@@ -2702,7 +2844,7 @@ int RunUnifiedMain(int argc, char **argv) {
         config.vocabularyPath,
         config.settingPath,
         ORB_SLAM3::System::MONOCULAR,
-        true,
+        config.useViewer,
         config.cloudMerge,
         config.cloudOnline,
         config.mergeAnyway,
@@ -2719,6 +2861,7 @@ int RunUnifiedMain(int argc, char **argv) {
         0,
         std::string(),
         config.environment);
+    ROS_INFO_STREAM("System runtime environment=" << ORB_SLAM3::RuntimeEnvironmentToString(slam.GetRuntimeEnvironment()));
     if (slam.GetCloudMerger() != nullptr) {
         slam.GetCloudMerger()->SetCloudMergeDebugOutputDir(
             outputDirectories.active.string());
@@ -2776,11 +2919,12 @@ int RunUnifiedMain(int argc, char **argv) {
         &UnifiedGrabber::GrabCloudMapCb,
         &grabber);
     ros::Subscriber landImageSubscriber;
-    if (ORB_SLAM3::IsLandAirEnvironment(config.environment)) {
-        landImageSubscriber = nodeHandle.subscribe(
-            config.rawImageTopic,
+    if (ORB_SLAM3::IsLandAirEnvironment(config.environment) &&
+        config.dataType == "ros") {
+        landImageSubscriber = nodeHandle.subscribe<topic_tools::ShapeShifter>(
+            config.imageTopic,
             10,
-            &UnifiedGrabber::GrabImage,
+            &UnifiedGrabber::GrabRosImage,
             &grabber);
     }
     ros::ServiceClient evoClient = nodeHandle.serviceClient<

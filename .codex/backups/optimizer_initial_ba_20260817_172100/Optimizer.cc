@@ -48,18 +48,11 @@ bool sortByVal(const pair<MapPoint *, int> &a, const pair<MapPoint *, int> &b) {
 void Optimizer::GlobalBundleAdjustemnt(Map *pMap, int nIterations, bool *pbStopFlag, const unsigned long nLoopKF, const bool bRobust) {
     vector<KeyFrame *> vpKFs = pMap->GetAllKeyFrames();
     vector<MapPoint *> vpMP = pMap->GetAllMapPoints();
-    // Monocular initialization calls this entry point without a stop flag or
-    // a loop keyframe id. Keep only that initial BA off the sparse
-    // SimplicialLDLT path, which was confirmed to crash during destruction.
-    const bool useDenseLinearSolver =
-        (pbStopFlag == nullptr && nLoopKF == 0UL);
-    BundleAdjustment(vpKFs, vpMP, nIterations, pbStopFlag, nLoopKF, bRobust,
-                     useDenseLinearSolver);
+    BundleAdjustment(vpKFs, vpMP, nIterations, pbStopFlag, nLoopKF, bRobust);
 }
 
 void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<MapPoint *> &vpMP,
-                                 int nIterations, bool *pbStopFlag, const unsigned long nLoopKF,
-                                 const bool bRobust, const bool useDenseLinearSolver) {
+                                 int nIterations, bool *pbStopFlag, const unsigned long nLoopKF, const bool bRobust) {
     vector<bool> vbNotIncludedMP;
     vbNotIncludedMP.resize(vpMP.size());
 
@@ -68,13 +61,7 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolver_6_3::LinearSolverType *linearSolver;
 
-    if (useDenseLinearSolver) {
-        linearSolver =
-            new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
-    } else {
-        linearSolver =
-            new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
-    }
+    linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
 
     g2o::BlockSolver_6_3 *solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
 
@@ -1089,11 +1076,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool *pbStopFlag, Map *pMap
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolver_6_3::LinearSolverType *linearSolver;
 
-    // The normal local BA window is bounded. The Eigen sparse backend has a
-    // confirmed AMD-ordering heap overflow on this BlockSolver_6_3 path, so
-    // use the compatible dense solver here.
-    linearSolver =
-        new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+    linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
 
     g2o::BlockSolver_6_3 *solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
 

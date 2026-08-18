@@ -1,6 +1,7 @@
 #ifndef CLOUDIMAGESAMPLER_H
 #define CLOUDIMAGESAMPLER_H
 
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <opencv2/core/core.hpp>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "KFDSample.h"
+#include "LandAirKfdEpisode.h"
 #include "System.h"
 
 namespace ORB_SLAM3 {
@@ -25,6 +27,15 @@ public:
 
 class CloudImageSampler {
 public:
+    struct LandAirFrontendDiagnostics {
+        std::uint64_t trackStepCount = 0;
+        std::uint64_t notInitializedTrackStepCount = 0;
+        std::uint64_t notInitializedSampledPayloadAdds = 0;
+        std::uint64_t notInitializedNoSamplingPayloadAdds = 0;
+        std::uint64_t kfdStepCallCount = 0;
+        std::uint64_t lkCallCount = 0;
+    };
+
     CloudImageSampler(System *pSys, int nTrackLast, int nNewTrackFirst, float nTrackLastMinTime, float nNewTrackFirstMinTime, float Kp, float Kd, float th);
     ~CloudImageSampler();
 
@@ -33,6 +44,7 @@ public:
 
     // KF过少或持续时间过短的Map会被重置，重置的KF将作为Lost Images
     void UpdateResetMapImages(Map *pMap);
+    LandAirFrontendDiagnostics GetLandAirFrontendDiagnostics() const;
 
     // const std::vector<CloudImage> &GetCurrentCloudProcessImages();
     // const std::vector<CloudImage> &GetLastCloudProcessImages();
@@ -52,6 +64,7 @@ private:
 
     System *mpSystem;
     KFDSample *mpKFDSampler;
+    LandAirKfdEpisode mLandAirKfdEpisode;
 
     int mState;
     int mTrackingLastState;
@@ -66,6 +79,10 @@ private:
     std::vector<CloudImage> mvCurrentCloudProcessNoSamplingImages;
     // 由于vCurrentCloudProcessImages在upload后会马上clear以保证vTrackLastNImages继续正常工作，但Cloud download时有可能使用原来的Images，这里保存Last Images
     std::vector<CloudImage> mvLastCloudProcessImages;
+    std::uint64_t mnLandAirTrackStepCount = 0;
+    std::uint64_t mnLandAirNotInitializedTrackStepCount = 0;
+    std::uint64_t mnLandAirNotInitializedSampledPayloadAdds = 0;
+    std::uint64_t mnLandAirNotInitializedNoSamplingPayloadAdds = 0;
 
 public:
     // param

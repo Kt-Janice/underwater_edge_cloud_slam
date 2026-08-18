@@ -19,6 +19,8 @@
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
+#include <atomic>
+#include <cstdint>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,6 +229,7 @@ public:
     // 一个新的Frame是由Tracker构建的，有一些关于摄像头的对象从这里得到最直接，传给构建CloudMap时使用
     CloudMerging *GetCloudMerger();
     RuntimeEnvironment GetRuntimeEnvironment() const;
+    std::uint64_t GetTrackMonocularInputCount() const;
     CloudImageSampler *GetCloudImageSampler();
     ORBextractor *GetInitExtractor();
     ORBextractor *GetExtractor();
@@ -252,6 +255,7 @@ private:
     // Input sensor
     eSensor mSensor;
     RuntimeEnvironment mRuntimeEnvironment = RuntimeEnvironment::LAND;
+    std::atomic<std::uint64_t> mnTrackMonocularInputCount{0};
 
     // ORB vocabulary used for place recognition and feature matching.
     ORBVocabulary *mpVocabulary;

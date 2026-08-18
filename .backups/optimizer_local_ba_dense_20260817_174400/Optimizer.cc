@@ -1089,11 +1089,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool *pbStopFlag, Map *pMap
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolver_6_3::LinearSolverType *linearSolver;
 
-    // The normal local BA window is bounded. The Eigen sparse backend has a
-    // confirmed AMD-ordering heap overflow on this BlockSolver_6_3 path, so
-    // use the compatible dense solver here.
-    linearSolver =
-        new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+    linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
 
     g2o::BlockSolver_6_3 *solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
 

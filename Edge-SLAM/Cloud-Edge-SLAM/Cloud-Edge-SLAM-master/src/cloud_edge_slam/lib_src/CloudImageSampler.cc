@@ -4,6 +4,7 @@
 #include "Tracking.h"
 #include <cstdlib>
 #include <opencv2/core.hpp>
+#include <ros/ros.h>
 #include <string>
 #include <utility>
 
@@ -41,16 +42,68 @@ float inline ComputeKFDistance(KeyFrame *pKF1, KeyFrame *pKF2) {
 }
 
 void CloudImageSampler::TrackStep(const int &curTrackingState, const bool &bIsKF, const int &nKFInMap, const int &curMapId, const cv::Mat &img, const double &timestamp) {
-    // 记录RECENTLY_LOST、NOT_INITIALIZED、LOST的图像
-    //return;
-    if (curTrackingState == Tracking::LOST || curTrackingState == Tracking::NOT_INITIALIZED || curTrackingState == Tracking::RECENTLY_LOST) {
-        mvLostNoSamplingImages.push_back(CloudImage(img, timestamp, "lost"));
-        bool bSelectKF = mpKFDSampler->Step(img, timestamp); // 对丢失的图像进行一系列判断
-        if (bSelectKF) {
-            mvLostImages.push_back(CloudImage(img, timestamp, "lost"));
+    const bool isLandAir = IsLandAirEnvironment(mpSystem->GetRuntimeEnvironment());
+    if (isLandAir) {
+        ++mnLandAirTrackStepCount;
+        const std::size_t lostImagesBefore = mvLostImages.size();
+        const std::size_t lostNoSamplingImagesBefore = mvLostNoSamplingImages.size();
+        const bool isNotInitialized = curTrackingState == Tracking::NOT_INITIALIZED;
+        if (isNotInitialized) {
+            ++mnLandAirNotInitializedTrackStepCount;
         }
-    } else {//没有丢失就清除之前的采样
-        mpKFDSampler->Reset();
+        const bool isLostSamplingState = curTrackingState == Tracking::RECENTLY_LOST || curTrackingState == Tracking::LOST;
+        const LandAirKfdEpisodeAction action = mLandAirKfdEpisode.Observe(isLostSamplingState, timestamp);
+
+        if (action == LandAirKfdEpisodeAction::RESET_AND_SKIP || action == LandAirKfdEpisodeAction::RESET_AND_STEP) {
+            mpKFDSampler->ResetLandAirEpisode();
+        }
+
+        if (isLostSamplingState) {
+            mvLostNoSamplingImages.push_back(CloudImage(img, timestamp, "lost"));
+        }
+
+        if (action == LandAirKfdEpisodeAction::RESET_AND_STEP || action == LandAirKfdEpisodeAction::STEP) {
+            bool accepted = false;
+            const bool selected = mpKFDSampler->StepForLandAir(img, timestamp, &accepted);
+            if (accepted) {
+                mLandAirKfdEpisode.CommitStepTimestamp(timestamp);
+            } else {
+                mLandAirKfdEpisode.ResetTimestampForRearm();
+            }
+            if (selected) {
+                mvLostImages.push_back(CloudImage(img, timestamp, "lost"));
+            }
+        } else if (action == LandAirKfdEpisodeAction::SKIP_OUT_OF_ORDER_TIMESTAMP) {
+            ROS_WARN_THROTTLE(1.0, "Skipping out-of-order LAND/AIR KFD timestamp");
+        } else if (action == LandAirKfdEpisodeAction::SKIP_INVALID_TIMESTAMP) {
+            ROS_WARN_THROTTLE(1.0, "Skipping invalid LAND/AIR KFD timestamp");
+        }
+
+        if (isNotInitialized) {
+            mnLandAirNotInitializedSampledPayloadAdds += mvLostImages.size() - lostImagesBefore;
+            mnLandAirNotInitializedNoSamplingPayloadAdds += mvLostNoSamplingImages.size() - lostNoSamplingImagesBefore;
+        }
+        ROS_INFO_THROTTLE(
+            60.0,
+            "LAND/AIR frontend diagnostics: track_monocular_input=%llu track_step=%llu not_initialized=%llu kfd=%llu lk=%llu not_initialized_lost_sampled_add=%llu not_initialized_lost_no_sampling_add=%llu",
+            static_cast<unsigned long long>(mpSystem->GetTrackMonocularInputCount()),
+            static_cast<unsigned long long>(mnLandAirTrackStepCount),
+            static_cast<unsigned long long>(mnLandAirNotInitializedTrackStepCount),
+            static_cast<unsigned long long>(mpKFDSampler->GetLandAirStepCallCount()),
+            static_cast<unsigned long long>(mpKFDSampler->GetLandAirLkCallCount()),
+            static_cast<unsigned long long>(mnLandAirNotInitializedSampledPayloadAdds),
+            static_cast<unsigned long long>(mnLandAirNotInitializedNoSamplingPayloadAdds));
+    } else {
+        // SEA compatibility path intentionally retains the legacy KFD API and semantics.
+        if (curTrackingState == Tracking::LOST || curTrackingState == Tracking::NOT_INITIALIZED || curTrackingState == Tracking::RECENTLY_LOST) {
+            mvLostNoSamplingImages.push_back(CloudImage(img, timestamp, "lost"));
+            bool bSelectKF = mpKFDSampler->Step(img, timestamp); // 对丢失的图像进行一系列判断
+            if (bSelectKF) {
+                mvLostImages.push_back(CloudImage(img, timestamp, "lost"));
+            }
+        } else {//没有丢失就清除之前的采样
+            mpKFDSampler->Reset();
+        }
     }
 
     // 是否Merge过，是否Map数量大于2，若不是则跳过
@@ -333,6 +386,17 @@ void CloudImageSampler::TrackStep(const int &curTrackingState, const bool &bIsKF
     // cout << "Cloud Image Sampler Tracker Cur State: " << curTrackingState << endl;
     // cout << "Cloud Image Sampler Sampler State: " << bSelectKF << endl;
     // cout << "Cloud Image Sampler State: " << mState << endl;
+}
+
+CloudImageSampler::LandAirFrontendDiagnostics CloudImageSampler::GetLandAirFrontendDiagnostics() const {
+    LandAirFrontendDiagnostics diagnostics;
+    diagnostics.trackStepCount = mnLandAirTrackStepCount;
+    diagnostics.notInitializedTrackStepCount = mnLandAirNotInitializedTrackStepCount;
+    diagnostics.notInitializedSampledPayloadAdds = mnLandAirNotInitializedSampledPayloadAdds;
+    diagnostics.notInitializedNoSamplingPayloadAdds = mnLandAirNotInitializedNoSamplingPayloadAdds;
+    diagnostics.kfdStepCallCount = mpKFDSampler->GetLandAirStepCallCount();
+    diagnostics.lkCallCount = mpKFDSampler->GetLandAirLkCallCount();
+    return diagnostics;
 }
 
 } // namespace ORB_SLAM3

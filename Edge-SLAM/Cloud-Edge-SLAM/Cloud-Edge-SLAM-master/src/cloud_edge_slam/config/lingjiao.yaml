@@ -1,0 +1,139 @@
+%YAML:1.0
+
+# ==============================================================================
+# 第一部分：OKVIS 需要的 VIO 前端参数
+# ==============================================================================
+# T_SC 由 rosbag /tf_static 计算得到：sensor_stereo_2_left -> sensor_wit_imu_link。
+# 其含义为将左相机坐标系中的点变换到 IMU 坐标系，符合 OKVIS 的 T_SC 方向。
+cameras:
+    - {T_SC:
+       [ 0.0, 0.0, 1.0, 0.3300,
+        -1.0, 0.0, 0.0, 0.0335,
+         0.0,-1.0, 0.0, 0.0820,
+         0.0, 0.0, 0.0, 1.0],
+       image_dimension: [410, 308],
+       distortion_coefficients: [-0.302179, 0.066495, 0.000845, 0.000131],  
+       distortion_type: radialtangential,
+       focal_length: [201.31896, 201.30372], 
+       principal_point: [201.00131, 131.99865]}  
+
+camera_params:
+    camera_rate: 30 
+    sigma_absolute_translation: 0.0
+    sigma_absolute_orientation: 0.0
+    sigma_c_relative_translation: 0.0 
+    sigma_c_relative_orientation: 0.0 
+
+imu_params:
+    a_max: 176.0 
+    g_max: 7.8 
+    sigma_g_c: 3.8630508456841180e-03 
+    sigma_a_c: 4.1657654150119905e-02 
+    sigma_bg: 0.03 
+    sigma_ba: 0.1 
+    sigma_gw_c: 3.778709302321241e-05 
+    sigma_aw_c: 6.4052169365732365e-04 
+    tau: 3600.0 
+    g: 9.81007 
+    a0: [ 0.0, 0.0, 0.0 ] 
+    imu_rate: 100
+    T_BS:
+        [1.0000, 0.0000, 0.0000, 0.0000,
+         0.0000, 1.0000, 0.0000, 0.0000,
+         0.0000, 0.0000, 1.0000, 0.0000,
+         0.0000, 0.0000, 0.0000, 1.0000]
+
+sonar_params:
+    T_SSo:  
+        [1.0, 0.0, 0.0, 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, 0.0,
+         0.0, 0.0, 0.0, 1.0] 
+
+numKeyframes: 5 
+numImuFrames: 3 
+
+ceres_options:
+    minIterations: 3   
+    maxIterations: 10
+    # 15
+    # 0.045  
+    timeLimit: 0.035   
+
+detection_options:
+    threshold: 15.0      
+    octaves: 3           
+    maxNoKeypoints: 600  
+    # 1000
+
+imageDelay: 0.0  # rosbag 时间戳同源性良好；最近邻统计不能标定固定时间偏移，暂设为 0
+displayImages: false  
+publishDebugImages: false  
+useDriver: false
+
+publishing_options:
+    publish_rate: 100                  
+    publishLandmarks: true             
+    landmarkQualityThreshold: 1.0e-2   
+    maximumLandmarkQuality: 0.05       
+    maxPathLength: 20                  
+    publishImuPropagatedState: true    
+    T_Wc_W:
+        [1.0000, 0.0000, 0.0000, 0.0000,
+         0.0000, 1.0000, 0.0000, 0.0000,
+         0.0000, 0.0000, 1.0000, 0.0000,
+         0.0000, 0.0000, 0.0000, 1.0000]
+    trackedBodyFrame: B                
+    velocitiesFrame: Wc                
+
+isSonarUsed: false
+isDepthUsed: false
+isRelocalization: false
+histogramMethod: "NONE" 
+claheClipLimit: 1.0
+claheTileGridSize: 4
+resizeFactor: 1.0
+
+# ==============================================================================
+# 第二部分：ORB-SLAM3 需要的后端与可视化参数
+# ==============================================================================
+
+File.version: "1.0"
+Camera.type: "PinHole"
+
+# ORB-SLAM3 读取的内参（对应原始畸变图像，使用 CameraInfo.K 与 D）
+Camera1.fx: 201.31896
+Camera1.fy: 201.30372
+Camera1.cx: 201.00131
+Camera1.cy: 131.99865
+Camera1.k1: -0.302179
+Camera1.k2: 0.066495
+Camera1.p1: 0.000845
+Camera1.p2: 0.000131
+
+Camera.fps: 30
+Camera.RGB: 1
+Camera.width: 410
+Camera.height: 308
+
+# ORB Extractor
+ORBextractor.nFeatures: 800
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+# Pangolin Viewer Parameters
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+
+# [非常重要] 开启 ORB-SLAM3 的可视化窗口
+Viewer.isActive: 1

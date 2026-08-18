@@ -28,7 +28,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <sys/stat.h> 
 #include <sys/types.h> 
-#include <experimental/filesystem>
+#include <filesystem>
 
 #include <ros/ros.h>
 #include <rosbag/bag.h>
@@ -107,6 +107,7 @@ public:
     void SetParameters(bool bWaitCloudResult, float nMainLoopSleep, string savePath, bool bSaveCloudBag, bool bOldUdf, bool bNewUdf);
     void SetNodeHandle(ros::NodeHandle *pNodeHandle);
     void SetOrbMapPublisher(ros::Publisher *pPublisher);
+    void SetImageTopicPublisher(ros::Publisher *pPublisher);
     void SetCloudImagesActionClient(CloudClient *pCloudImagesActionClient);
     // **********************************************
 
@@ -155,6 +156,7 @@ public:
     ros::NodeHandle *mpNodeHandler;
     ros::Publisher *mpOrbMapPub;
     ros::Subscriber *mpMemorySub;
+    ros::Publisher *mpImageTopicPub;
     CloudClient *mpCloudImagesActionClient = NULL;
 
     std::vector<float> mvMemory;
@@ -273,20 +275,26 @@ int main(int argc, char **argv) {
         cerr << "create path failed! error code: !!!!!!!!!!!!" << isCreate << endl;
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
-    ORB_SLAM3::System SLAM(vocabularyPath, settingPath, ORB_SLAM3::System::MONOCULAR, true, bCloudMerge, bCloudOnline, bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum, nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd, samplerPDth, bOldUdf, bNewUdf);//
+    // LAND here marks this legacy executable as the LAND/AIR compatibility path;
+    // it does not assert that the physical dataset scene is necessarily land.
+    ORB_SLAM3::System SLAM(vocabularyPath, settingPath, ORB_SLAM3::System::MONOCULAR, true, bCloudMerge, bCloudOnline, bMergeAnyway, bKFCulling, nSamplerEdgeFrontKFNum, nSamplerEdgeBackKFNum, nSamplerEdgeFrontMinTime, nSamplerEdgeBackMinTime, samplerPDKp, samplerPDKd, samplerPDth, bOldUdf, bNewUdf, 0, std::string(), ORB_SLAM3::RuntimeEnvironment::LAND);//
     //调用system.cc，初始化orbslam3，输入一些参数，如字典路径、yaml路径，相机类型，可视化查看器，launch中的参数
+    ROS_INFO_STREAM("System runtime environment=" << ORB_SLAM3::RuntimeEnvironmentToString(SLAM.GetRuntimeEnvironment()));
     Grabber igb(&SLAM);
 
     igb.SetParameters(bWaitCloudResult, mainLoopSleep, full_path, bSaveCloudBag, bOldUdf, bNewUdf);//设置几个参数，如是否等待云端结果，每帧运行后睡眠时间，保存的路径
-
     igb.SetNodeHandle(&nh);//270-281
-
     ros::Publisher orbMapPub = nh.advertise<cloud_edge_slam::CloudMap>("/test_cloud_map", 1);
     igb.SetOrbMapPublisher(&orbMapPub);
+    
+    ros::Publisher imageTopicPub = nh.advertise<sensor_msgs::CompressedImage>("/cloud_edge_images", 100);
+    igb.SetImageTopicPublisher(&imageTopicPub);
 
     ros::ServiceClient evoClient = nh.serviceClient<cloud_edge_slam::Evo>("/cloud_edge_evo_temp");
 
     ros::Subscriber memorySub = nh.subscribe("/cloud_edge_memory_temp", 1, &Grabber::MemoryCb, &igb);
+
+    ROS_INFO_STREAM("Topic Begin!");
 
     // For Pub Cloud Images
     // CloudClient cloudImagesActionClient("/test_pub_cloud_images", true);
@@ -309,8 +317,14 @@ int main(int argc, char **argv) {
 
     ros::Subscriber cloud_map_sub = nh.subscribe("/test_cloud_map", 1, &Grabber::GrabCloudMapCb, &igb);
 
+    ROS_INFO_STREAM("Topic finish!");
+    
     std::chrono::steady_clock::time_point timeStart = std::chrono::steady_clock::now();
+
+    ROS_INFO_STREAM("ROS Begin!");
+
     if (bCloudOnline) {
+        ROS_INFO_STREAM("Waiting For Bag Begin!");
         if (dataType == "txt") {
             igb.RunTxt(dataPath);
         } else if (dataType == "bag") {
@@ -325,7 +339,7 @@ int main(int argc, char **argv) {
     duration /= 1e3;
 
     // begin export
-    std::string map_point = "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/results/point.txt";
+    std::string map_point = "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/results/point.txt";
     std::ofstream fout_map_point(map_point);
     fout_map_point << SLAM.GetAtlas()->MapPointsInMap() << endl;
     fout_map_point << duration << endl;
@@ -466,6 +480,10 @@ void Grabber::SetNodeHandle(ros::NodeHandle *pNodeHandle) {
     mpNodeHandler = pNodeHandle;
 }
 
+void Grabber::SetImageTopicPublisher(ros::Publisher *pPublisher) {
+    mpImageTopicPub = pPublisher;
+}
+
 void Grabber::SetOrbMapPublisher(ros::Publisher *pPublisher) {
     mpOrbMapPub = pPublisher;
 }
@@ -475,21 +493,22 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
         int width = img.cols * imageScale;
         int height = img.rows * imageScale;
         cv::resize(img, img, cv::Size(width, height));
-    }
-
+    }//根据 imageScale 缩放图像
+    //记录处理图像的次数，并每隔1秒输出一次日志信息
     static int cnt = 0;
     ROS_INFO_STREAM_DELAYED_THROTTLE(1.0, "Deal One Image: " << cnt);
     cnt++;
 
     // @note input image
-    mpSLAM->TrackMonocular(img, timestamp);//转至System.cc的387行，输入图像和时间戳
+    mpSLAM->TrackMonocular(img, timestamp);//转至System.cc的387行，输入图像和时间戳,进行单目视觉追踪。
 
     // return;
 
-    // 主动式检测Cloud Image
+    // 主动式检测Cloud Image获取并处理云图像，如果启用了云图像保存，则将云图像写入文件
     std::vector<ORB_SLAM3::CloudImage> vCurrentProcessCloudImages;
     std::vector<ORB_SLAM3::CloudImage> vCurrentProcessCloudNoSamplingImages;
     int edgeFrontMapId, edgeBackMapId;
+    //获取当前处理的点云图像及其未采样版本，以及边缘地图ID
     mpSLAM->GetCloudProcessImages(vCurrentProcessCloudImages, vCurrentProcessCloudNoSamplingImages, edgeFrontMapId, edgeBackMapId);
     if (!vCurrentProcessCloudImages.empty()) {
         // @note print
@@ -497,6 +516,7 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
         // debug: write cloud images
         static int index = 0;
         index++;
+        //启用了保存点云包的功能，则将点云图像保存为Bag文件，并记录文件大小
         if (mbSaveCloudBag) {
             string curCloudBagPath = (bfs::path(mSaveDir) / "cloud_").string() + to_string(index) + ".bag";
             WriteCloudImagesBag(vCurrentProcessCloudImages, curCloudBagPath);
@@ -510,17 +530,20 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
             mvNoSamplingBagSize[curTimestamp] = noSamplingBagSize;
         }
 
-        // @note Publish Cloud Images Action
+        // @note Publish Cloud Images Action-->将当前处理的云端图像打包成一个消息并发送给Action Client
         if (this->mpCloudImagesActionClient) { //开启云端
             // @note print
-            ROS_INFO_STREAM("Action Client");
-            sensor_msgs::CameraInfo cameraInfo = getCameraInfo(mpSLAM->GetSetting()->newImSize().width, mpSLAM->GetSetting()->newImSize().height, mpSLAM->GetCamera()->toK_());
+            /**ROS_INFO_STREAM("Action Client");
+            //获取相机信息并创建图像序列消息
+            /sensor_msgs::CameraInfo cameraInfo = getCameraInfo(mpSLAM->GetSetting()->newImSize().width, mpSLAM->GetSetting()->newImSize().height, mpSLAM->GetCamera()->toK_());
 
+            //设置图像序列消息的时间戳、相机信息和地图ID
             cloud_edge_slam::Sequence imageSeqMsg;
             imageSeqMsg.Header.stamp = ros::Time::now();
             imageSeqMsg.camera = cameraInfo;
             imageSeqMsg.edge_front_map_mnid = edgeFrontMapId;
             imageSeqMsg.edge_back_map_mnid = edgeBackMapId;
+            //遍历当前处理的云端图像，为每张图像创建ROS图像消息并添加到序列消息中
             for (auto &image : vCurrentProcessCloudImages) {
                 std_msgs::Header header;
                 header.stamp = ros::Time(image.timestamp);
@@ -534,18 +557,88 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
 
                 imageSeqMsg.images.push_back(*msg);
                 imageSeqMsg.timestamps.push_back(image.timestamp);
+                cout << "Main: Pub Cloud Images-------------------------------------1 !" << endl;
             }
-
+	    
             // debug bandwidth: write seq
             // WriteSeqBag(imageSeqMsg, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/test_seq.bag");
 
-            goal.sequence = imageSeqMsg;
+            goal.sequence = imageSeqMsg;//更新目标对象的序列号为当前图像序列号
+            //发送目标：通过sendGoal方法发送目标。回调函数：分别用于处理动作完成、动作激活和反馈信息
             mpCloudImagesActionClient->sendGoal(goal,
                                                 boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
                                                 CloudClient::SimpleActiveCallback(),
                                                 CloudClient::SimpleFeedbackCallback());
+            cout << "Main: Pub Cloud Images------------------------------------2 !" << endl;*/
 
-            // @note 等待CloudMerging结束再继续
+	     ROS_INFO_STREAM("Action Client Triggered");
+
+            sensor_msgs::CameraInfo cameraInfo = getCameraInfo(mpSLAM->GetSetting()->newImSize().width, mpSLAM->GetSetting()->newImSize().height, mpSLAM->GetCamera()->toK_()); 
+            cloud_edge_slam::Sequence imageSeqMsg;
+            imageSeqMsg.Header.stamp = ros::Time::now();
+            imageSeqMsg.camera = cameraInfo;
+            imageSeqMsg.edge_front_map_mnid = edgeFrontMapId;
+            imageSeqMsg.edge_back_map_mnid = edgeBackMapId;
+
+            for (auto &img : vCurrentProcessCloudImages) {
+                imageSeqMsg.timestamps.push_back(img.timestamp);
+            }
+        
+            int total_imgs = vCurrentProcessCloudImages.size();
+            std::vector<sensor_msgs::CompressedImagePtr> msgs_buffer(total_imgs);
+            
+            #pragma omp parallel for
+            for (int i = 0; i < total_imgs; ++i) {
+                const auto &image = vCurrentProcessCloudImages[i];
+                
+                sensor_msgs::CompressedImagePtr msg(new sensor_msgs::CompressedImage());
+                msg->header.stamp = ros::Time(image.timestamp);
+                msg->header.frame_id = image.type; 
+                msg->format = "jpeg";
+        
+                std::vector<int> params; 
+                params.push_back(cv::IMWRITE_JPEG_QUALITY); 
+                params.push_back(100); // 压缩质量
+        
+        
+                cv::imencode(".jpg", image.img, msg->data, params);
+                msgs_buffer[i] = msg;
+            }
+        
+            goal.sequence = imageSeqMsg;
+            goal.total_image_count = total_imgs; 
+            mpCloudImagesActionClient->sendGoal(goal,
+                                                boost::bind(&Grabber::ActionFinishCb, this, _1, _2),
+                                                CloudClient::SimpleActiveCallback(),
+                                                CloudClient::SimpleFeedbackCallback());
+        
+            ros::Duration(1.0).sleep(); 
+            ROS_INFO("Start send %d images by Topic...", total_imgs);
+            ros::Rate burst_rate(100); 
+            //ros::Rate burst_rate(100.0); // 高速发送
+            ROS_ERROR_STREAM("pubing");
+            /*for (auto &msg : msgs_buffer) {
+                if (mpImageTopicPub->getNumSubscribers() > 0 || true) {
+                    mpImageTopicPub->publish(msg);
+                }
+                ros::spinOnce();
+                burst_rate.sleep();
+            }*/
+            for (auto &msg : msgs_buffer) {
+		  // 修正：仅在确有订阅者时发布消息，避免资源浪费
+		  if (mpImageTopicPub->getNumSubscribers() > 0) { 
+		    mpImageTopicPub->publish(msg);
+		    ROS_DEBUG("Published one image"); // 调试时可使用，高频发布时建议关闭INFO输出
+		  } else {
+		    ROS_WARN_THROTTLE(1.0, "No subscribers connected, message not published."); // 限速警告，避免刷屏
+		    // 或者可以考虑在长时间无订阅者时跳出循环
+		    // break;
+		  }
+		  
+		  burst_rate.sleep(); // 维持发布频率
+	     }
+	     //ros::spinOnce(); // 处理回调，保持节点响应
+            // @note 等待CloudMerging结束->再继续如果等待云端结果标志为真，则先休眠10秒，等待云端图像处理结果，再休眠1秒。接着进入一个循环，每隔0.1秒检查一次点云合并是否完成，直到点云合并结束
             if (mbWaitCloudResult) {
                 sleep(10);
                 mpCloudImagesActionClient->waitForResult();
@@ -555,12 +648,11 @@ void Grabber::TrackImage(const cv::Mat &img, const double &timestamp, const floa
                 }
             }
 
-            mpSLAM->SetTrackLostTimestamp(timestamp);
+            mpSLAM->SetTrackLostTimestamp(timestamp);//设置跟踪丢失的时间戳
         }
-        mpSLAM->ResetCloudProcessImages();
+        mpSLAM->ResetCloudProcessImages();//重置与点云处理相关的图像数据
     }
 }
-
 void Grabber::RunTxt(const string &txt_path) {
     string data_dir = txt_path.substr(0, txt_path.rfind('/'));
     // Retrieve paths to images
@@ -641,11 +733,12 @@ void Grabber::RunBag(const string &bag_path) {
     std::vector<std::string> topics;
     //const string image_topic_name = "/camera/color/image_raw/compressed";
     //const string image_topic_name = "/G0/camera/color/image_raw/compressed";
-    const string image_topic_name = "/camera/rgb/image_color";//tum、icl....
+    //const string image_topic_name = "/camera/rgb/image_color";//tum、icl....
     //const string image_topic_name = "/camera/color/image_color";
-    //const string image_topic_name = "/cam0/image_raw";//euroc
+    const string image_topic_name = "/cam0/image_raw";//euroc
+    // const string image_topic_name = "/left/image_raw";//eee
     //const string image_topic_name = "/merge/image_raw/compressed";
-    //const string image_topic_name = "/camera/color/image_raw";//nan.bag
+    // const string image_topic_name = "/camera/color/image_raw";//nan.bag
     topics.push_back(image_topic_name);
 
     int nImages = 0;
@@ -765,7 +858,7 @@ void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, cons
     //在此接收关键变量，并等待加载bag数据集，调用ROSMapToORBMap函数 //new_udf_cloud-edge
     if(this->mbNewUdf) {
         cloud_edge_slam::CloudMapConstPtr pMap(new cloud_edge_slam::CloudMap(result->map));
-        std::string pc_name = "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
+        std::string pc_name = "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
         std::ofstream fout_pc_name(pc_name);
 
         for (int n = 0; n < pMap->map_points.size(); n++){
@@ -773,7 +866,7 @@ void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, cons
         }
         fout_pc_name.close();
 
-        std::string id_name = "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_others/id.txt";
+        std::string id_name = "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_others/id.txt";
         std::ofstream fout_id_name(id_name);
 
         fout_id_name << pMap->edge_front_map_mnid << std::endl;
@@ -783,7 +876,7 @@ void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, cons
         bool trans = true;
 
         do{
-            bool test1 = exists_test("/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag");//未生成此文件
+            bool test1 = exists_test("/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag");//未生成此文件
 
             if (test1 == true){
                 trans = false;
@@ -796,7 +889,7 @@ void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, cons
         ROS_ERROR_STREAM("Begin read cloud_map_bag");
         rosbag::Bag test_bag_all;
         sleep(3);
-        test_bag_all.open("/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag", rosbag::bagmode::Read); //打开bag并读取
+        test_bag_all.open("/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag", rosbag::bagmode::Read); //打开bag并读取
         ROS_ERROR_STREAM("End read cloud_map_bag");
         std::vector<std::string> topics;
         const string map_topic_name = "/test";
@@ -813,7 +906,7 @@ void Grabber::ActionFinishCb(const actionlib::SimpleClientGoalState &state, cons
         // mpSLAM->InsertCloudMap(ROSMapToORBMap(mapPtr));
         ROS_INFO_STREAM("Cloud Process Finish!");
         test_bag_all.close();
-        system("rm /home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag");
+        system("rm /home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_bag/test.bag");
     }
     //cap-udf-new
     else {
@@ -1041,7 +1134,7 @@ ORB_SLAM3::Map *Grabber::ROSMapToORBMap(cloud_edge_slam::CloudMapConstPtr pMap) 
 
     //cap-udf
     if (this->mbOldUdf) {
-        std::string pc_name = "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
+        std::string pc_name = "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
         std::ofstream fout_pc_name(pc_name);
 
         for (int n = 0; n < pMap->map_points.size(); n++){
@@ -1052,7 +1145,7 @@ ORB_SLAM3::Map *Grabber::ROSMapToORBMap(cloud_edge_slam::CloudMapConstPtr pMap) 
         bool trans = true;
 
         do{
-            bool test1 = exists_test("/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz");
+            bool test1 = exists_test("/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz");
 
             if (test1 == true){
                 trans = false;
@@ -1149,7 +1242,7 @@ void Grabber::SaveORBMapCb(const std_msgs::Int16ConstPtr &msg) {
     } else {
         pMap = mpSLAM->GetAtlas()->GetSpecifyMap(mapMnId);
     }
-    WriteCloudMapBag(ORBMapToROSMap(pMap), "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/TestData/All_ORB_Test_Offline_Map/" + to_string(mapMnId) + ".bag");
+    WriteCloudMapBag(ORBMapToROSMap(pMap), "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/TestData/All_ORB_Test_Offline_Map/" + to_string(mapMnId) + ".bag");
 }
 
 void Grabber::WriteCloudMapBag(cloud_edge_slam::CloudMap map, const std::string &save_path) {

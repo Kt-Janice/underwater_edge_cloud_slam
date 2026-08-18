@@ -1,0 +1,110 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# System config
+#--------------------------------------------------------------------------------------------
+
+#System.LoadAtlasFromFile: "Session_MARS_AMtown01_Mono"
+#System.SaveAtlasToFile: "Session_MARS_AMtown01_Mono"
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+# MARS-LVIG AMtown / AMvalley calibration
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# amtown
+# Camera1.fx: 726.94
+# Camera1.fy: 726.425
+# Camera1.cx: 591.265
+# Camera1.cy: 522.91
+
+# Camera1.k1: -0.052
+# Camera1.k2: 0.1168
+# Camera1.p1: 0.0015
+# Camera1.p2: 0.00013
+
+# Camera.width: 1224
+# Camera.height: 1024
+
+# Camera1.fx: 1453.88
+# Camera1.fy: 1452.85
+# Camera1.cx: 1182.53
+# Camera1.cy: 1045.82
+
+# Camera1.k1: -0.052
+# Camera1.k2: 0.1168
+# Camera1.p1: 0.0015
+# Camera1.p2: 0.00013
+
+# Camera.width: 2448
+# Camera.height: 2048
+
+# hkairport
+# Camera1.fx: 722.215831395
+# Camera1.fy: 722.171768344
+# Camera1.cx: 588.900539701
+# Camera1.cy: 521.800513284
+
+# Camera1.k1: -0.05729528706141188
+# Camera1.k2: 0.1210407244166642
+# Camera1.p1: 0.001274128378760289
+# Camera1.p2: 0.0004389741530109464
+
+# Camera.width: 1224
+# Camera.height: 1024
+
+Camera1.fx: 1444.43166279
+Camera1.fy: 1444.343536688
+Camera1.cx: 1177.801079402
+Camera1.cy: 1043.601026568
+
+Camera1.k1: -0.05729528706141188
+Camera1.k2: 0.1210407244166642
+Camera1.p1: 0.001274128378760289
+Camera1.p2: 0.0004389741530109464
+
+Camera.width: 2448
+Camera.height: 2048
+
+
+Camera.fps: 10
+
+# MARS images are color; typical ROS/OpenCV decoded ordering is BGR.
+Camera.RGB: 0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# You can lower these values if your images have low contrast
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#---------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

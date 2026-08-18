@@ -30,6 +30,7 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib_msgs
   sensor_msgs
   std_msgs
+  topic_tools
   okvis_ros
   image_transport
 )
@@ -183,8 +184,35 @@ include_directories(
   /home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/okvis_ros/okvis/okvis_cameras/include
 )
 
+set(
+  CLOUD_EDGE_G2O_LIBRARY
+  "${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.a"
+  CACHE FILEPATH
+  "Absolute path to the g2o static library used by Cloud-Edge SLAM"
+)
+
+get_filename_component(
+  CLOUD_EDGE_G2O_LIBRARY_REALPATH
+  "${CLOUD_EDGE_G2O_LIBRARY}"
+  REALPATH
+)
+
+if(NOT EXISTS "${CLOUD_EDGE_G2O_LIBRARY_REALPATH}")
+  message(FATAL_ERROR
+    "CLOUD_EDGE_G2O_LIBRARY does not exist: "
+    "${CLOUD_EDGE_G2O_LIBRARY}"
+  )
+endif()
+
+message(STATUS
+  "Cloud-Edge g2o archive: "
+  "${CLOUD_EDGE_G2O_LIBRARY_REALPATH}"
+)
+
 set(CLOUD_EDGE_COMMON_SOURCES
   lib_src/RuntimeEnvironment.cc
+  lib_src/LandAirKfdEpisode.cc
+  lib_src/RosImageInput.cc
   lib_src/CloudMergeTicket.cc
   lib_src/CloudUploadTransactionGate.cc
   lib_src/BackendWriteController.cc
@@ -282,7 +310,7 @@ foreach(CLOUD_EDGE_FINAL_LIBRARY ${CLOUD_EDGE_FINAL_LIBRARIES})
     ${Pangolin_LIBRARIES}
     ${PCL_LIBRARIES}
     ${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
-    ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.a
+    ${CLOUD_EDGE_G2O_LIBRARY_REALPATH}
     -lboost_serialization
     -lcrypto
     ${catkin_LIBRARIES}
@@ -408,6 +436,21 @@ target_link_libraries(cloud_edge_node
 catkin_add_gtest(test_runtime_environment test/test_runtime_environment.cpp)
 if(TARGET test_runtime_environment)
   target_link_libraries(test_runtime_environment gtest_main cloud_edge_sla_lib)
+endif()
+
+catkin_add_gtest(test_land_air_kfd_episode test/test_land_air_kfd_episode.cpp)
+if(TARGET test_land_air_kfd_episode)
+  target_sources(test_land_air_kfd_episode PRIVATE
+    lib_src/KFDSample.cc
+    lib_src/ORBextractor.cc
+    lib_src/LandAirKfdEpisode.cc
+  )
+  target_link_libraries(test_land_air_kfd_episode gtest_main ${OpenCV_LIBS})
+endif()
+
+catkin_add_gtest(test_ros_image_input test/test_ros_image_input.cpp)
+if(TARGET test_ros_image_input)
+  target_link_libraries(test_ros_image_input gtest_main cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_cloud_merge_ticket test/test_cloud_merge_ticket.cpp)

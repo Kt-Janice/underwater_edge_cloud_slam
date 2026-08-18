@@ -1,6 +1,7 @@
 #ifndef KFDSAMPLER_HPP
 #define KFDSAMPLER_HPP
 
+#include <cstdint>
 #include <iostream>
 
 #include <opencv2/core.hpp>
@@ -82,6 +83,21 @@ public:
 
     void Reset();
     bool Step(const Mat &inputIm, double timeStamp);
+
+    void ResetLandAirEpisode();
+    // pAccepted is set only when this input has safely advanced the strict
+    // LAND/AIR KFD state.  A false return can still mean a valid, non-selected
+    // frame, so callers must use pAccepted for timestamp bookkeeping.
+    bool StepForLandAir(const Mat &inputIm, double timeStamp, bool *pAccepted = nullptr);
+    std::uint64_t GetLandAirStepCallCount() const;
+    std::uint64_t GetLandAirLkCallCount() const;
+
+private:
+    bool IsValidLandAirImage(const Mat &image) const;
+    bool AreFiniteLandAirPoints(const vector<Point2f> &points) const;
+    bool BuildLandAirBaseline(const Mat &image, double timeStamp);
+    std::uint64_t mnLandAirStepCallCount = 0;
+    std::uint64_t mnLandAirLkCallCount = 0;
 };
 
 #endif

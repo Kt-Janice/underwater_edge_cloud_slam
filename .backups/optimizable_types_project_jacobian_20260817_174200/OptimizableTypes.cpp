@@ -143,10 +143,7 @@ void EdgeSE3ProjectXYZ::linearizeOplus() {
     double y = xyz_trans[1];
     double z = xyz_trans[2];
 
-    // Materialize the negated Jacobian.  `auto` would retain an Eigen lazy
-    // expression referring to the temporary returned by projectJac().
-    const Eigen::Matrix<double, 2, 3> projectJac =
-        -pCamera->projectJac(xyz_trans);
+    auto projectJac = -pCamera->projectJac(xyz_trans);
 
     _jacobianOplusXi = projectJac * T.rotation().toRotationMatrix();
 

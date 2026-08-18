@@ -1,0 +1,74 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# System config
+#--------------------------------------------------------------------------------------------
+
+#System.LoadAtlasFromFile: "Session_MUN_FRL_Quarry1_Mono"
+#System.SaveAtlasToFile: "Session_MUN_FRL_Quarry1_Mono"
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+# MUN-FRL DJI M600 downward-facing camera calibration
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "KannalaBrandt8"
+
+Camera1.fx: 854.383024
+Camera1.fy: 853.285954
+Camera1.cx: 780.324522
+Camera1.cy: 520.690672
+
+# MUN-FRL KANNALA_BRANDT coefficients k2,k3,k4,k5 map to
+# ORB-SLAM3 KannalaBrandt8 k1,k2,k3,k4 respectively.
+Camera1.k1: -0.07937700
+Camera1.k2: 0.02228435
+Camera1.k3: -0.03852023
+Camera1.k4: 0.01346873
+
+Camera.width: 1440
+Camera.height: 1080
+
+# Keep identical to calibrated input size to avoid uncalibrated resize.
+Camera.newWidth: 1440
+Camera.newHeight: 1080
+
+Camera.fps: 20
+
+# Downward camera is Mono8, so this field is ignored.
+Camera.RGB: 0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# You can lower these values if your images have low contrast
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#---------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

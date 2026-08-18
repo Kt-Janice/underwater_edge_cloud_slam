@@ -9,17 +9,17 @@
         <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />
 
                                     <!-- SEA -->
-        <remap from="/camera0" to="/davis_left/image_raw" />
-        <remap from="/imu" to="/davis_left/imu" />
-        <remap from="/camera/rgb/image_color" to="/davis_left/image_raw" />
-        <param name="raw_image_topic" value="/davis_left/image_raw" />
-        <param name="setting_path" value="$(find cloud_edge_slam)/config/davis.yaml" />
+        <remap from="/camera0" to="/sensor_stereo_2/left/image_raw" />
+        <remap from="/imu" to="/sensor/wit/imu" />
+        <remap from="/camera/rgb/image_color" to="/sensor_stereo_2/left/image_raw" />
+        <param name="raw_image_topic" value="/sensor_stereo_2/left/image_raw" />
+        <param name="setting_path" value="$(find cloud_edge_slam)/config/lingjiao.yaml" />
                                     <!-- land -->
         <!-- <remap from="/camera/rgb/image_color" to="/cam0/image_raw" />
         <param name="setting_path" value="$(find cloud_edge_slam)/config/euroc.yaml" />  -->
 
         <param name="data_type" value="bag" />
-        <param name="data_path" value="/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/MH_01_easy.bag" />
+        <param name="data_path" value="/media/lhf/T7 Shield/Dataset/underwater_dataset/ling_jiao/lingjiao.bag" />
         <!-- <param name="data_path" value="/media/lhf/T7 Shield/Dataset/水下数据集/AquaticVision(港中深）/04_loop/data rosbag/Loop1_with_board_imu_200hz_images_20hz.bag" /> -->
 
 
