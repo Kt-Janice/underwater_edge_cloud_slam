@@ -1420,12 +1420,12 @@ void Optimizer::OptimizeEssentialGraph(Map *pMap, KeyFrame *pLoopKF, KeyFrame *p
     z_vec << 0.0, 0.0, 1.0;
 
     const int minFeat = 100;
-
     // Set KeyFrame vertices
     for (size_t i = 0, iend = vpKFs.size(); i < iend; i++) {
         KeyFrame *pKF = vpKFs[i];
-        if (pKF->isBad())
+        if (pKF->isBad()) {
             continue;
+        }
         g2o::VertexSim3Expmap *VSim3 = new g2o::VertexSim3Expmap();
 
         const int nIDi = pKF->mnId;
@@ -1494,7 +1494,6 @@ void Optimizer::OptimizeEssentialGraph(Map *pMap, KeyFrame *pLoopKF, KeyFrame *p
         KeyFrame *pKF = vpKFs[i];
 
         const int nIDi = pKF->mnId;
-
         g2o::Sim3 Swi;
 
         LoopClosing::KeyFrameAndPose::const_iterator iti = NonCorrectedSim3.find(pKF);
@@ -1626,7 +1625,6 @@ void Optimizer::OptimizeEssentialGraph(Map *pMap, KeyFrame *pLoopKF, KeyFrame *p
     // Correct points. Transform to "non-optimized" reference keyframe pose and transform back with optimized pose
     for (size_t i = 0, iend = vpMPs.size(); i < iend; i++) {
         MapPoint *pMP = vpMPs[i];
-
         if (pMP->isBad())
             continue;
 
@@ -1654,7 +1652,6 @@ void Optimizer::OptimizeEssentialGraph(Map *pMap, KeyFrame *pLoopKF, KeyFrame *p
 
         pMP->UpdateNormalAndDepth();
     }
-
     // TODO Check this changeindex
     pMap->IncreaseChangeIndex();
 }

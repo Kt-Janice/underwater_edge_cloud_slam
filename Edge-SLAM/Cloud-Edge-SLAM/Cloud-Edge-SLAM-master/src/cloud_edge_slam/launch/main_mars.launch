@@ -13,13 +13,14 @@
     <arg name="data_path" default="" />
     <arg name="use_viewer" default="true" />
     <arg name="start_rviz" default="true" />
+    <arg name="node_launch_prefix" default="" />
 
     <arg name="real_online" default="false" />
     <arg name="cloud_online" default="true" />
     <arg name="cloud_merge" default="true" />
 
     <param name="/use_sim_time" value="true" />
-    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_node" required="true">
+    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_node" required="true" launch-prefix="$(arg node_launch_prefix)">
         <param name="runtime_environment" value="air" />
         <param name="use_viewer" value="$(arg use_viewer)" />
         <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />

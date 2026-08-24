@@ -1,0 +1,209 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# System config
+#--------------------------------------------------------------------------------------------
+
+# MARS-LVIG / ORB-SLAM3 Monocular-Inertial
+#
+# Scene switching:
+#   1. Only ONE camera calibration block may be active.
+#   2. Only the matching IMU.T_b_c1 block may be active.
+#   3. HKairport/HKisland is active by default.
+#   4. AMtown/AMvalley is disabled by comments.
+#
+#
+# - Livox Avia raw accelerometer samples are specified by Livox in unit g.
+#   ORB-SLAM3 requires acceleration in m/s^2.
+#   If the MARS bag /livox/imu still contains values around 1 g at rest,
+#   convert linear_acceleration by multiplying 9.80665 before feeding ORB-SLAM3.
+#
+#System.LoadAtlasFromFile: "Session_MARS_IMU"
+#System.SaveAtlasToFile: "Session_MARS_IMU"
+
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+
+# ============================
+# AMtown / AMvalley
+# DISABLED
+# Source: AMtown.yaml
+# ============================
+
+# Camera1.fx: 1453.72
+# Camera1.fy: 1453.28
+# Camera1.cx: 1172.18
+# Camera1.cy: 1041.78
+#
+# Camera1.k1: -0.1210
+# Camera1.k2: 0.1113
+# Camera1.p1: 0.0016
+# Camera1.p2: 0.00013
+# Camera1.k3: -0.062353
+
+
+# ============================
+# HKairport / HKisland
+# ACTIVE
+# Source: HKairport.yaml
+# ============================
+
+Camera1.fx: 1451.28
+Camera1.fy: 1451.29
+Camera1.cx: 1177.5
+Camera1.cy: 1043.5
+
+Camera1.k1: -0.0572
+Camera1.k2: 0.1209
+Camera1.p1: 0.00124
+Camera1.p2: -0.00018
+Camera1.k3: -0.06327
+
+
+# Original MARS-LVIG image size
+Camera.width: 2448
+Camera.height: 2048
+
+# Keep the same resize strategy as the existing monocular MARS config.
+# ORB-SLAM3 Settings.cc rescales fx/fy/cx/cy internally when newWidth/newHeight
+# differ from Camera.width/Camera.height.
+Camera.newWidth: 1224
+Camera.newHeight: 1024
+
+# MARS camera rate
+Camera.fps: 10
+
+# Color order: 0 = BGR, 1 = RGB
+Camera.RGB: 0
+
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB-SLAM3 convention:
+#
+#   IMU.T_b_c1 = T_b_c
+#
+# Transformation from camera frame to body/IMU frame:
+#
+#   p_imu = R_b_c * p_cam + t_b_c
+#
+# The following Camera-IMU transforms are obtained by composing:
+#
+#   MARS Camera <-> LiDAR calibration
+#   +
+#   Livox Avia LiDAR <-> built-in IMU calibration
+#
+# and converting the result to the ORB-SLAM3 Camera -> IMU convention.
+
+
+# ============================
+# AMtown / AMvalley
+# DISABLED
+# Camera -> Avia IMU
+# ============================
+
+# IMU.T_b_c1: !!opencv-matrix
+#    rows: 4
+#    cols: 4
+#    dt: f
+#    data: [
+#       -0.00224640, -0.00842110,  0.99996200,  0.093335093,
+#       -0.99972990,  0.02315010, -0.00205090,  0.019285625,
+#       -0.02313190, -0.99969660, -0.00847080,  0.027838216,
+#        0.0,         0.0,         0.0,         1.0
+#    ]
+
+
+# ============================
+# HKairport / HKisland
+# ACTIVE
+# Camera -> Avia IMU
+# ============================
+
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [
+       0.00438814, -0.00978695,  0.99994200,  0.114230563,
+      -0.99980700,  0.01911450,  0.00457463,  0.037988061,
+      -0.01915820, -0.99976900, -0.00970118,  0.058366474,
+       0.0,         0.0,         0.0,         1.0
+   ]
+
+
+# Insert keyframes while recently lost.
+# ORB-SLAM3 defaults to true when this field is omitted.
+IMU.InsertKFsWhenLost: 1
+
+
+#--------------------------------------------------------------------------------------------
+# IMU noise
+#--------------------------------------------------------------------------------------------
+#
+# MARS-LVIG does not provide a dataset-specific Allan-variance calibration for
+# the particular Avia unit used in these sequences.
+#
+# The values below are a defensible initial profile from an Allan-variance
+# calibration of the same Livox Avia / BMI088 IMU model (M3DGR, avg-axis):
+#
+#   Gyroscope white-noise density : rad/s/sqrt(Hz)
+#   Accelerometer white noise     : m/s^2/sqrt(Hz)
+#   Gyroscope bias random walk    : rad/s^2/sqrt(Hz)
+#   Accelerometer bias random walk: m/s^3/sqrt(Hz)
+#
+# For a final quantitative experiment, replace these with Allan-variance
+# values measured from the actual MARS IMU if a static recording is available.
+
+IMU.NoiseGyro: 0.0032194626705221046
+IMU.NoiseAcc: 0.020846225165441278
+IMU.GyroWalk: 0.00007138339242610945
+IMU.AccWalk: 0.0003409997836292951
+
+# Livox Avia IMU push rate
+IMU.Frequency: 200.0
+
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+# Keep identical to the existing monocular MARS configuration.
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# FAST thresholds
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+# Keep identical to the existing monocular MARS configuration.
+#---------------------------------------------------------------------------------------------
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

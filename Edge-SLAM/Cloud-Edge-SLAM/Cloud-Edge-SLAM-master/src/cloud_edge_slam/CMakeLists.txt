@@ -318,7 +318,7 @@ foreach(CLOUD_EDGE_FINAL_LIBRARY ${CLOUD_EDGE_FINAL_LIBRARIES})
 endforeach()
 
 set_target_properties(cloud_edge_sla_lib PROPERTIES
-  LINK_FLAGS "-Wl,-z,defs -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_sla_lib.link.map"
+  LINK_FLAGS "-Wl,-z,defs -Wl,-Bsymbolic -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_sla_lib.link.map"
 )
 set_target_properties(cloud_edge_sea_legacy_lib PROPERTIES
   LINK_FLAGS "-Wl,-z,defs -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/cloud_edge_sea_legacy_lib.link.map"

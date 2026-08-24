@@ -1,6 +1,6 @@
 <launch>
     <arg name="setting_path" default="$(find cloud_edge_slam)/config/eee.yaml" />
-    <arg name="dataset_name" default="eee_01" />
+    <arg name="dataset_name" default="eee_02" />
     <arg name="image_topic" default="/left/image_raw" />
     <!-- Default to external rosbag-play. For node-owned bag playback, pass
          data_type:=bag and an absolute data_path. -->
