@@ -1,14 +1,15 @@
 <launch>
-    <arg name="setting_path" default="$(find cloud_edge_slam)/config/mars.yaml" />
+    <arg name="setting_path" default="$(find cloud_edge_slam)/config/mars_imu.yaml" />
 
     <!-- <arg name="dataset_name" default="AMtown01" />
     <arg name="image_topic" default="/left_camera/image/compressed" /> -->
 
     <arg name="dataset_name" default="HKairport01" />
     <arg name="image_topic" default="/left_camera/image/compressed" />
-
-    <!-- Default to external rosbag-play. For node-owned bag playback, pass
-         data_type:=bag and an absolute data_path. -->
+    <arg name="orb3_mode" default="mono" />
+    <!-- <arg name="orb3_mode" default="mono_imu" /> -->
+    <arg name="imu_topic" default="/livox/imu" />
+    <arg name="imu_accel_scale" default="9.80665" />
     <arg name="data_type" default="ros" />
     <arg name="data_path" default="" />
     <arg name="use_viewer" default="true" />
@@ -29,6 +30,9 @@
         <param name="dataset_name" value="$(arg dataset_name)" />
         <param name="data_path" value="$(arg data_path)" />
         <param name="image_topic" value="$(arg image_topic)" />
+        <param name="orb3_mode" value="$(arg orb3_mode)" />
+        <param name="imu_topic" value="$(arg imu_topic)" />
+        <param name="imu_accel_scale" value="$(arg imu_accel_scale)" />
         <param name="result_path" value="$(find cloud_edge_slam)/results" />
         <param name="cloud_topic_name" value="/cloud_slam" />
         <param name="merge_anyway" value="false" />

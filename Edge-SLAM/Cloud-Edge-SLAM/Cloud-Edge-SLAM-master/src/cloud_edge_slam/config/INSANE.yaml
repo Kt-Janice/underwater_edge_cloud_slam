@@ -1,0 +1,116 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# ORB-SLAM3 Monocular-Inertial configuration for INSANE outdoor_1
+# Calibration set: KLU1
+#
+# Camera:
+#   INSANE downward-facing Navigation Camera
+#   Topic in original INSANE data: /mission_cam/image_raw
+#
+# IMU:
+#   PX4 main IMU (ICM20689), 200 Hz
+#
+# KLU1 camera intrinsics/distortion and Camera-PX4-IMU extrinsic are taken
+# directly from the official INSANE preprocessed calibration:
+#   camera_calibration_klu1.yaml
+#
+# IMPORTANT:
+# The official preprocessed calibration package does NOT contain PX4 IMU Allan
+# noise-density/random-walk values. The four IMU noise entries below remain
+# TEMPORARY fallback values and must be replaced after processing the official
+# 4-hour static sensor data if exact INSANE IMU noise parameters are required.
+#--------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# KLU1 navigation camera, radtan model
+# intrinsics: [fx, fy, cx, cy]
+Camera1.fx: 1140.568807287164
+Camera1.fy: 1138.229332477909
+Camera1.cx: 1050.4263115571923
+Camera1.cy: 731.6675708950979
+
+# distortion_coeffs: [k1, k2, p1, p2]
+Camera1.k1: -0.24953155709879407
+Camera1.k2: 0.052177152480177444
+Camera1.p1: 4.248459864565281e-05
+Camera1.p2: -0.00017620193709646758
+
+# Camera resolution
+Camera.width: 2056
+Camera.height: 1542
+
+# Keep native resolution
+Camera.newWidth: 1028
+Camera.newHeight: 771
+
+# Navigation camera frame rate
+Camera.fps: 20
+
+# Navigation camera is monochrome
+Camera.RGB: 0
+
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters
+#--------------------------------------------------------------------------------------------
+
+# Official KLU1 Kalibr-format transform:
+# T_cam_px4imu from camera_calibration_klu1.yaml.
+#
+# The numerical matrix is written directly here, matching the convention used
+# by the official ORB-SLAM3 EuRoC configuration, which likewise uses Kalibr's
+# T_cam_imu numerical transform in IMU.T_b_c1.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-0.9994755028106611, -0.022518362304292116,  0.023273217235888752, -0.2527399835555562,
+          -0.02275197225831357,  0.9996928897440455,   -0.00982211553366561,   0.045387794112330376,
+          -0.023044891836004854,-0.010346475454587485, -0.9996808907876226,   -0.019307258157050512,
+           0.0,                   0.0,                    0.0,                     1.0]
+
+# TEMPORARY fallback values.
+# These are NOT claimed to be INSANE/KLU1 official Allan calibration values.
+# Replace using the official INSANE 4-hour static sensor data when available.
+IMU.NoiseGyro: 3.00e-03
+IMU.NoiseAcc: 2.00e-03
+IMU.GyroWalk: 5.00e-05
+IMU.AccWalk: 3.00e-03
+
+# PX4 main IMU rate
+IMU.Frequency: 200.0
+
+
+#--------------------------------------------------------------------------------------------
+# ORB Extractor Parameters
+#--------------------------------------------------------------------------------------------
+
+ORBextractor.nFeatures: 1000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

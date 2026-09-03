@@ -12,6 +12,9 @@
 
 #include "CloudMergeTicket.h"
 #include "CloudUploadTransactionGate.h"
+#include "ImuMeasurementAdapter.h"
+#include "LandAirInertialInput.h"
+#include "Orb3Mode.h"
 #include "RosImageInput.h"
 #include "RuntimeEnvironment.h"
 #include "System.h"
@@ -37,6 +40,7 @@
 #include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
+#include <sensor_msgs/Imu.h>
 #include <sensor_msgs/image_encodings.h>
 #include <std_msgs/Float32.h>
 #include <std_msgs/Int16.h>
@@ -50,6 +54,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -1040,6 +1045,14 @@ struct RuntimeConfig {
     std::string resultPath;
     // land/air ROS tracking 图像订阅话题。
     std::string imageTopic;
+    // ORB-SLAM3 单目运行模式及其对应的 Sensor 枚举。
+    std::string orb3Mode = "mono";
+    ORB_SLAM3::System::eSensor orb3SensorMode =
+        ORB_SLAM3::System::MONOCULAR;
+    bool useImu = false;
+    // 仅 mono_imu 使用的 LAND/AIR ROS IMU 话题与加速度数值缩放。
+    std::string imuTopic;
+    double imuAccelScale = 1.0;
     // 结果目录使用的数据集名称；ros 模式不依赖 dataPath。
     std::string datasetName;
     // sea 原始图像缓存话题；同时保留给 legacy RunBag 路径。
@@ -1112,6 +1125,42 @@ RuntimeConfig LoadRuntimeConfig(ros::NodeHandle &nodeHandle) {
         nodeHandle,
         "sampler_pd_th",
         config.samplerPdThreshold);
+    nodeHandle.param<std::string>("orb3_mode", config.orb3Mode, "mono");
+    try {
+        config.orb3SensorMode = ParseOrb3Mode(config.orb3Mode);
+    } catch (const std::invalid_argument &exception) {
+        ROS_FATAL_STREAM("Invalid orb3_mode: " << exception.what());
+        throw;
+    }
+    config.useImu = Orb3ModeUsesImu(config.orb3SensorMode);
+    if (config.useImu &&
+        (!ORB_SLAM3::IsLandAirEnvironment(config.environment) ||
+         config.dataType != "ros")) {
+        ROS_FATAL(
+            "orb3_mode=mono_imu currently requires LAND/AIR "
+            "data_type=ros input");
+        throw std::runtime_error(
+            "orb3_mode=mono_imu requires land/air ros input");
+    }
+    if (config.useImu) {
+        RequireRosParameter(nodeHandle, "imu_topic", config.imuTopic);
+        if (config.imuTopic.empty()) {
+            ROS_FATAL("orb3_mode=mono_imu requires a non-empty imu_topic");
+            throw std::runtime_error(
+                "orb3_mode=mono_imu requires a non-empty imu_topic");
+        }
+        nodeHandle.param<double>(
+            "imu_accel_scale",
+            config.imuAccelScale,
+            1.0);
+        if (!ImuMeasurementAdapter::IsValidAccelScale(config.imuAccelScale)) {
+            ROS_FATAL_STREAM(
+                "imu_accel_scale must be finite and greater than zero, got "
+                << config.imuAccelScale);
+            throw std::runtime_error(
+                "imu_accel_scale must be finite and greater than zero");
+        }
+    }
     const bool rawImageTopicProvided = nodeHandle.getParam(
         "raw_image_topic",
         config.rawImageTopic);
@@ -1324,7 +1373,8 @@ public:
     UnifiedGrabber(
         ORB_SLAM3::System *slam,
         const RuntimeConfig &config,
-        const std::string &saveDirectory);
+        const std::string &saveDirectory,
+        bool useImu);
     ~UnifiedGrabber();
 
     void SetCloudClient(CloudClient *client);
@@ -1340,7 +1390,13 @@ public:
     void GrabRawImage(const sensor_msgs::ImageConstPtr &message);
     void GrabCompressedImage(
         const sensor_msgs::CompressedImageConstPtr &message);
-    void TrackImage(const cv::Mat &image, double timestamp, float imageScale);
+    void GrabImu(const sensor_msgs::ImuConstPtr &message);
+    void TrackImage(
+        const cv::Mat &image,
+        double timestamp,
+        float imageScale,
+        const std::vector<ORB_SLAM3::IMU::Point> &imuMeasurements =
+            std::vector<ORB_SLAM3::IMU::Point>());
     static void LoadImages(
         const std::string &file,
         std::vector<std::string> &imageFiles,
@@ -1386,10 +1442,24 @@ private:
         const LostUploadRequest &request,
         int &edgeFrontMapId,
         int &edgeBackMapId);
+    void QueueLandAirImage(
+        const cv::Mat &image,
+        double timestamp,
+        float imageScale);
+    void StartLandAirInertialWorker();
+    void StopLandAirInertialWorker();
+    void RunLandAirInertialWorker();
+    void RethrowLandAirInertialWorkerException();
 
     ORB_SLAM3::System *mpSLAM = nullptr;
     RuntimeConfig mConfig;
     std::string mSaveDirectory;
+    const bool mUseImu = false;
+    std::unique_ptr<ImuMeasurementAdapter> mImuMeasurementAdapter;
+    std::unique_ptr<LandAirInertialInput> mLandAirInertialInput;
+    std::thread mLandAirInertialWorker;
+    std::mutex mLandAirInertialWorkerExceptionMutex;
+    std::exception_ptr mLandAirInertialWorkerException;
     CloudClient *mpCloudClient = nullptr;
     ros::Publisher *mpImagePublisher = nullptr;
     ros::Publisher *mpOrbMapPublisher = nullptr;
@@ -1423,17 +1493,25 @@ private:
 UnifiedGrabber::UnifiedGrabber(
     ORB_SLAM3::System *slam,
     const RuntimeConfig &config,
-    const std::string &saveDirectory)
+    const std::string &saveDirectory,
+    const bool useImu)
     : mpSLAM(slam),
       mConfig(config),
       mSaveDirectory(saveDirectory),
+      mUseImu(useImu),
       mpTransactionGate(
           std::make_shared<ORB_SLAM3::CloudUploadTransactionGate>()),
       mpUploadLifecycle(std::make_shared<UploadLifecycleState>()) {
+    if (mUseImu) {
+        mImuMeasurementAdapter.reset(
+            new ImuMeasurementAdapter(config.imuAccelScale));
+        mLandAirInertialInput.reset(new LandAirInertialInput());
+    }
 }
 
 // 析构保护：确保 detached 上传已被唤醒并排空后才释放成员依赖。
 UnifiedGrabber::~UnifiedGrabber() {
+    StopLandAirInertialWorker();
     ShutdownUploads();
 }
 
@@ -1671,7 +1749,8 @@ bool UnifiedGrabber::DispatchCloudImages(
 void UnifiedGrabber::TrackImage(
     const cv::Mat &image,
     const double timestamp,
-    const float imageScale) {
+    const float imageScale,
+    const std::vector<ORB_SLAM3::IMU::Point> &imuMeasurements) {
     cv::Mat trackingImage = image;
     if (imageScale != 1.0F) {
         const int width = static_cast<int>(image.cols * imageScale);
@@ -1679,7 +1758,7 @@ void UnifiedGrabber::TrackImage(
         cv::resize(image, trackingImage, cv::Size(width, height));
     }
 
-    mpSLAM->TrackMonocular(trackingImage, timestamp);
+    mpSLAM->TrackMonocular(trackingImage, timestamp, imuMeasurements);
     std::vector<ORB_SLAM3::CloudImage> sampledImages;
     std::vector<ORB_SLAM3::CloudImage> unsampledImages;
     int edgeFrontMapId = 0;
@@ -1720,6 +1799,141 @@ void UnifiedGrabber::TrackImage(
         }
     }
     mpSLAM->ResetCloudProcessImages();
+}
+
+void UnifiedGrabber::QueueLandAirImage(
+    const cv::Mat &image,
+    const double timestamp,
+    const float imageScale) {
+    const LandAirInertialInput::PushResult result =
+        mLandAirInertialInput->PushImage(image, timestamp, imageScale);
+    if (result == LandAirInertialInput::PushResult::ACCEPTED) {
+        return;
+    }
+
+    if (result == LandAirInertialInput::PushResult::INVALID_TIMESTAMP) {
+        ROS_WARN_THROTTLE(
+            5.0,
+            "Dropping LAND/AIR ROS image with a non-finite timestamp");
+        return;
+    }
+
+    ROS_WARN_THROTTLE(
+        5.0,
+        "Dropping non-monotonic LAND/AIR ROS image timestamp");
+}
+
+void UnifiedGrabber::GrabImu(const sensor_msgs::ImuConstPtr &message) {
+    if (!mUseImu) {
+        return;
+    }
+    if (message == nullptr) {
+        ROS_WARN_THROTTLE(5.0, "Received null LAND/AIR ROS IMU message");
+        return;
+    }
+
+    const ORB_SLAM3::IMU::Point measurement =
+        mImuMeasurementAdapter->Adapt(*message);
+    const LandAirInertialInput::PushResult result =
+        mLandAirInertialInput->PushImu(measurement);
+    if (result == LandAirInertialInput::PushResult::ACCEPTED) {
+        return;
+    }
+
+    if (result == LandAirInertialInput::PushResult::INVALID_TIMESTAMP) {
+        ROS_WARN_THROTTLE(
+            5.0,
+            "Dropping LAND/AIR ROS IMU with a non-finite timestamp");
+        return;
+    }
+
+    ROS_WARN_THROTTLE(
+        5.0,
+        "Dropping non-monotonic LAND/AIR ROS IMU timestamp");
+}
+
+void UnifiedGrabber::StartLandAirInertialWorker() {
+    if (!mUseImu || mLandAirInertialWorker.joinable()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mLandAirInertialWorkerExceptionMutex);
+        mLandAirInertialWorkerException = nullptr;
+    }
+    mLandAirInertialWorker = std::thread(
+        &UnifiedGrabber::RunLandAirInertialWorker,
+        this);
+}
+
+void UnifiedGrabber::StopLandAirInertialWorker() {
+    if (!mUseImu) {
+        return;
+    }
+
+    mLandAirInertialInput->Stop();
+    if (mLandAirInertialWorker.joinable()) {
+        mLandAirInertialWorker.join();
+    }
+}
+
+void UnifiedGrabber::RethrowLandAirInertialWorkerException() {
+    std::exception_ptr exception;
+    {
+        std::lock_guard<std::mutex> lock(mLandAirInertialWorkerExceptionMutex);
+        exception = mLandAirInertialWorkerException;
+    }
+    if (exception) {
+        std::rethrow_exception(exception);
+    }
+}
+
+void UnifiedGrabber::RunLandAirInertialWorker() {
+    try {
+        while (true) {
+            LandAirTrackingPacket packet;
+            double droppedTimestamp = 0.0;
+            const LandAirInertialInput::PacketResult result =
+                mLandAirInertialInput->WaitForReadyPacket(
+                    packet,
+                    droppedTimestamp);
+            if (result == LandAirInertialInput::PacketResult::STOPPED) {
+                return;
+            }
+            if (result ==
+                LandAirInertialInput::PacketResult::DROPPED_FIRST_IMAGE) {
+                ROS_WARN_STREAM(
+                    "Dropping first LAND/AIR image at " << droppedTimestamp
+                    << " because all available IMU samples are later");
+                continue;
+            }
+            if (result != LandAirInertialInput::PacketResult::READY) {
+                continue;
+            }
+            TrackImage(
+                packet.image,
+                packet.timestamp,
+                packet.imageScale,
+                packet.imuMeasurements);
+        }
+    } catch (const std::exception &exception) {
+        {
+            std::lock_guard<std::mutex> lock(
+                mLandAirInertialWorkerExceptionMutex);
+            mLandAirInertialWorkerException = std::current_exception();
+        }
+        ROS_FATAL_STREAM(
+            "LAND/AIR inertial worker failed: " << exception.what());
+        ros::shutdown();
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(
+                mLandAirInertialWorkerExceptionMutex);
+            mLandAirInertialWorkerException = std::current_exception();
+        }
+        ROS_FATAL("LAND/AIR inertial worker failed with an unknown exception");
+        ros::shutdown();
+    }
 }
 
 // ROS 泛型图像订阅回调：按真实消息类型分发到 raw 或 compressed 路径。
@@ -1799,10 +2013,13 @@ void UnifiedGrabber::GrabRawImage(
             "Received raw ROS image that converted to an empty OpenCV image");
         return;
     }
-    TrackImage(
-        cvImage->image,
-        message->header.stamp.toSec(),
-        mpSLAM->GetImageScale());
+    const double timestamp = message->header.stamp.toSec();
+    const float imageScale = mpSLAM->GetImageScale();
+    if (mUseImu) {
+        QueueLandAirImage(cvImage->image, timestamp, imageScale);
+        return;
+    }
+    TrackImage(cvImage->image, timestamp, imageScale);
 }
 
 // ROS 压缩图像订阅回调：按原始通道语义解码后转发到 land/air TrackImage。
@@ -1826,10 +2043,13 @@ void UnifiedGrabber::GrabCompressedImage(
         return;
     }
 
-    TrackImage(
-        image,
-        message->header.stamp.toSec(),
-        mpSLAM->GetImageScale());
+    const double timestamp = message->header.stamp.toSec();
+    const float imageScale = mpSLAM->GetImageScale();
+    if (mUseImu) {
+        QueueLandAirImage(image, timestamp, imageScale);
+        return;
+    }
+    TrackImage(image, timestamp, imageScale);
 }
 
 // 解析 txt 数据集索引；file 前三行是格式头，后续每行是“时间戳 图像相对路径”。
@@ -1966,7 +2186,15 @@ void UnifiedGrabber::RunLandAirRuntime() {
         return;
     }
     if (mConfig.dataType == "ros") {
-        ros::spin();
+        StartLandAirInertialWorker();
+        try {
+            ros::spin();
+        } catch (...) {
+            StopLandAirInertialWorker();
+            throw;
+        }
+        StopLandAirInertialWorker();
+        RethrowLandAirInertialWorkerException();
         return;
     }
     throw std::runtime_error(
@@ -2840,10 +3068,18 @@ int RunUnifiedMain(int argc, char **argv) {
         << ORB_SLAM3::RuntimeEnvironmentToString(config.environment)
         << ", output=" << outputDirectories.active.string());
 
+    const ORB_SLAM3::System::eSensor sensorMode = config.orb3SensorMode;
+    const bool useImu = config.useImu;
+    if (useImu) {
+        ROS_INFO("ORB-SLAM3 mode=mono_imu, Sensor=IMU_MONOCULAR");
+    } else {
+        ROS_INFO("ORB-SLAM3 mode=mono, Sensor=MONOCULAR");
+    }
+
     ORB_SLAM3::System slam(
         config.vocabularyPath,
         config.settingPath,
-        ORB_SLAM3::System::MONOCULAR,
+        sensorMode,
         config.useViewer,
         config.cloudMerge,
         config.cloudOnline,
@@ -2885,7 +3121,8 @@ int RunUnifiedMain(int argc, char **argv) {
     UnifiedGrabber grabber(
         &slam,
         config,
-        outputDirectories.active.string());
+        outputDirectories.active.string(),
+        useImu);
     grabber.SetOrbMapPublisher(&orbMapPublisher);
     grabber.SetImagePublisher(&imagePublisher);
     if (wrapper != nullptr) {
@@ -2919,6 +3156,7 @@ int RunUnifiedMain(int argc, char **argv) {
         &UnifiedGrabber::GrabCloudMapCb,
         &grabber);
     ros::Subscriber landImageSubscriber;
+    ros::Subscriber landImuSubscriber;
     if (ORB_SLAM3::IsLandAirEnvironment(config.environment) &&
         config.dataType == "ros") {
         landImageSubscriber = nodeHandle.subscribe<topic_tools::ShapeShifter>(
@@ -2926,6 +3164,13 @@ int RunUnifiedMain(int argc, char **argv) {
             10,
             &UnifiedGrabber::GrabRosImage,
             &grabber);
+        if (useImu) {
+            landImuSubscriber = nodeHandle.subscribe<sensor_msgs::Imu>(
+                config.imuTopic,
+                200,
+                &UnifiedGrabber::GrabImu,
+                &grabber);
+        }
     }
     ros::ServiceClient evoClient = nodeHandle.serviceClient<
         cloud_edge_slam::Evo>("/cloud_edge_evo_temp");
@@ -2934,6 +3179,7 @@ int RunUnifiedMain(int argc, char **argv) {
     static_cast<void>(publishMapSubscriber);
     static_cast<void>(cloudMapSubscriber);
     static_cast<void>(landImageSubscriber);
+    static_cast<void>(landImuSubscriber);
     static_cast<void>(evoClient);
     static_cast<void>(wrapperGlobalPointerGuard);
 

@@ -1,0 +1,102 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# ORB-SLAM3 Monocular-Inertial configuration for FWAF-VID
+# Camera: Intel RealSense D435i infra1 (left IR camera)
+# IMU: D435i built-in IMU
+#
+# Sensor parameters are taken from the official FWAF-VID calibration files:
+#   calibr/D435i+Build_in_IMU/imu_stereo-camchain-imucam.yaml
+#   calibr/D435i+Build_in_IMU/imu.yaml
+# and cross-checked against the authors' ORB-SLAM3 RealSense_D435i.yaml.
+#
+# IMPORTANT:
+# Kalibr's T_cam_imu matrix is written directly here, consistent with the
+# official ORB-SLAM3 EuRoC configuration and the FWAF-VID authors' ORB-SLAM3 config.
+#--------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters
+#--------------------------------------------------------------------------------------------
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV)
+Camera1.fx: 385.9663579533714
+Camera1.fy: 386.66632586105874
+Camera1.cx: 326.31560591362586
+Camera1.cy: 228.94820856640544
+
+Camera1.k1: -0.006216881543788755
+Camera1.k2: -0.008965831146637354
+Camera1.p1: -0.006699760163435405
+Camera1.p2: 0.004722332098436569
+
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
+
+# Keep native resolution; no extra resizing
+Camera.newWidth: 640
+Camera.newHeight: 480
+
+# Camera frame rate
+Camera.fps: 30
+
+# infra1 is grayscale; RGB flag is ignored for grayscale images
+Camera.RGB: 0
+
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters
+#--------------------------------------------------------------------------------------------
+
+# FWAF-VID Kalibr cam0 T_cam_imu.
+# This is kept in the same numerical convention used by the official ORB-SLAM3
+# EuRoC configuration and by FWAF-VID's published ORB-SLAM3 configuration.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.9999978428666332, -0.0020626331674709077,  0.0002445536679971544,  0.0068706905627631334,
+          0.0020591058598098803,  0.9999048617538134,     0.013639190743778217,   0.005774391225183149,
+         -0.0002726630487956618, -0.01363865776033396,    0.9999069520057144,    -0.028350501013237113,
+          0.0,                    0.0,                     0.0,                     1.0]
+
+# FWAF-VID D435i built-in IMU Allan/noise parameters
+IMU.NoiseGyro: 2.1056473846954868e-03
+IMU.NoiseAcc: 1.2116163608259510e-02
+IMU.GyroWalk: 1.6015774431543977e-05
+IMU.AccWalk: 2.3267111948367786e-04
+
+# IMU sampling rate
+IMU.Frequency: 200.0
+
+
+#--------------------------------------------------------------------------------------------
+# ORB Extractor Parameters
+#--------------------------------------------------------------------------------------------
+
+ORBextractor.nFeatures: 1000
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

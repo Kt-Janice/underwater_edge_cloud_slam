@@ -211,7 +211,10 @@ message(STATUS
 
 set(CLOUD_EDGE_COMMON_SOURCES
   lib_src/RuntimeEnvironment.cc
+  lib_src/Orb3Mode.cc
   lib_src/LandAirKfdEpisode.cc
+  lib_src/ImuMeasurementAdapter.cc
+  lib_src/LandAirInertialInput.cc
   lib_src/RosImageInput.cc
   lib_src/CloudMergeTicket.cc
   lib_src/CloudUploadTransactionGate.cc
@@ -451,6 +454,16 @@ endif()
 catkin_add_gtest(test_ros_image_input test/test_ros_image_input.cpp)
 if(TARGET test_ros_image_input)
   target_link_libraries(test_ros_image_input gtest_main cloud_edge_sla_lib)
+endif()
+
+catkin_add_gtest(
+  test_land_air_inertial_input
+  test/test_land_air_inertial_input.cpp)
+if(TARGET test_land_air_inertial_input)
+  target_link_libraries(
+    test_land_air_inertial_input
+    gtest_main
+    cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_cloud_merge_ticket test/test_cloud_merge_ticket.cpp)

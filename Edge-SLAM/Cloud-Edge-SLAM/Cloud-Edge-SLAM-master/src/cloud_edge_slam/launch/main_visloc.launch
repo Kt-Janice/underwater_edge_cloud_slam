@@ -1,22 +1,40 @@
 <launch>
-    <param name="/use_sim_time" value="true" />
-    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_slam_node" required="true" > 
-    
-        <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />
-        <param name="setting_path" value="$(find cloud_edge_slam)/config/visloc.yaml" />
-        <param name="data_type" value="bag" /> 
-        <!-- <param name="data_path" value="/media/lhf/T7 Shield/Dataset/euroc/MH_03_medium/MH_03_medium.bag" /> -->
-        <!-- <param name="data_path" value="/media/lhf/T7 Shield/Dataset/uav/UAV_VisLoc_dataset/03/uav_visloc_03_5hz.bag" /> -->
-        <param name="data_path" value="/media/lhf/T7 Shield/Dataset/uav/UAV_VisLoc_dataset/03/uav_visloc_03_calib_225_5hz.bag" />
-        <!-- <param name="data_path" value="/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/uav_visloc_03_calib_225_5hz.bag" /> -->
+    <arg name="setting_path" default="$(find cloud_edge_slam)/config/visloc.yaml" />
+    <arg name="dataset_name" default="UAV_VisLoc_03" />
+    <arg name="image_topic" default="/cam0/image_raw" />
+    <arg name="raw_image_topic" default="/cam0/image_raw" />
+    <arg name="orb3_mode" default="mono" />
+    <arg name="imu_topic" default="/imu0" />
+    <arg name="imu_accel_scale" default="1.0" />
+    <arg name="data_type" default="bag" />
+    <arg name="data_path" default="/media/lhf/T7 Shield/Dataset/uav/UAV_VisLoc_dataset/03/uav_visloc_03_calib_225_5hz.bag" />
+    <arg name="use_viewer" default="true" />
+    <arg name="start_rviz" default="true" />
+    <arg name="node_launch_prefix" default="" />
+    <arg name="real_online" default="false" />
+    <arg name="cloud_online" default="true" />
+    <arg name="cloud_merge" default="true" />
 
-        <param name="result_path" value="/home/lhf/vc-SLAM_ws/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/src/cloud_edge_slam/results" />
+    <param name="/use_sim_time" value="true" />
+    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_node" required="true" launch-prefix="$(arg node_launch_prefix)">
+        <param name="runtime_environment" value="air" />
+        <param name="use_viewer" value="$(arg use_viewer)" />
+        <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />
+        <param name="setting_path" value="$(arg setting_path)" />
+        <param name="data_type" value="$(arg data_type)" />
+        <param name="dataset_name" value="$(arg dataset_name)" />
+        <param name="data_path" value="$(arg data_path)" />
+        <param name="image_topic" value="$(arg image_topic)" />
+        <param name="raw_image_topic" value="$(arg raw_image_topic)" />
+        <param name="orb3_mode" value="$(arg orb3_mode)" />
+        <param name="imu_topic" value="$(arg imu_topic)" />
+        <param name="imu_accel_scale" value="$(arg imu_accel_scale)" />
+        <param name="result_path" value="$(find cloud_edge_slam)/results" />
         <param name="cloud_topic_name" value="/cloud_slam" />
-        
         <param name="merge_anyway" value="false" />
-        <param name="cloud_online" value="true" />
-        <param name="real_online" value="false" />
-        <param name="cloud_merge" value="true" />
+        <param name="cloud_online" value="$(arg cloud_online)" />
+        <param name="real_online" value="$(arg real_online)" />
+        <param name="cloud_merge" value="$(arg cloud_merge)" />
         <param name="save_cloud_bag" value="false" />
         <param name="old_udf_cloud_edge" value="false" />
         <param name="new_udf_cloud_edge" value="true" />
@@ -29,11 +47,9 @@
         <param name="sampler_pd_kp" value="0.8" />
         <param name="sampler_pd_kd" value="0.08" />
         <param name="sampler_pd_th" value="12" />
-        <param name="old_udf_cloud_edge" value="false" />
-        <param name="new_udf_cloud_edge" value="true" />
         <param name="kf_culling" value="false" />
-        <param name="stitch_trajectories" value="true" />
     </node>
-    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find cloud_edge_slam)/config/rviz_svin.rviz" />
-
+    <group if="$(arg start_rviz)">
+        <node name="rviz" pkg="rviz" type="rviz" args="-d $(find cloud_edge_slam)/config/rviz_svin.rviz" />
+    </group>
 </launch>

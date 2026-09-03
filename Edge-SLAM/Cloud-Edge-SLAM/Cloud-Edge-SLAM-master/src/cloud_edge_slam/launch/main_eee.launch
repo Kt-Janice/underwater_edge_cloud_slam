@@ -8,12 +8,17 @@
     <arg name="data_path" default="" />
     <arg name="use_viewer" default="true" />
     <arg name="start_rviz" default="true" />
+    <arg name="node_launch_prefix" default="" />
     <arg name="real_online" default="false" />
     <arg name="cloud_online" default="true" />
     <arg name="cloud_merge" default="true" />
+    <arg name="orb3_mode" default="mono" />
+    <!-- <arg name="orb3_mode" default="mono_imu" /> -->
+    <arg name="imu_topic" default="/imu0" />
+    <arg name="imu_accel_scale" default="1.0" />
 
     <param name="/use_sim_time" value="true" />
-    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_node" required="true">
+    <node name="cloud_edge_slam" pkg="cloud_edge_slam" type="cloud_edge_node" required="true" launch-prefix="$(arg node_launch_prefix)">
         <param name="runtime_environment" value="air" />
         <param name="use_viewer" value="$(arg use_viewer)" />
         <param name="vocabulary_path" value="$(find cloud_edge_slam)/Vocabulary/ORBvoc.txt" />
@@ -22,6 +27,9 @@
         <param name="dataset_name" value="$(arg dataset_name)" />
         <param name="data_path" value="$(arg data_path)" />
         <param name="image_topic" value="$(arg image_topic)" />
+        <param name="orb3_mode" value="$(arg orb3_mode)" />
+        <param name="imu_topic" value="$(arg imu_topic)" />
+        <param name="imu_accel_scale" value="$(arg imu_accel_scale)" />
         <param name="result_path" value="$(find cloud_edge_slam)/results" />
         <param name="cloud_topic_name" value="/cloud_slam" />
         <param name="merge_anyway" value="false" />
