@@ -23,6 +23,7 @@
 #include "FrameDrawer.h"
 #include "Converter.h"
 #include "G2oTypes.h"
+#include "MetricExpObservability.h"
 #include "Optimizer.h"
 #include "Pinhole.h"
 #include "KannalaBrandt8.h"
@@ -31,13 +32,57 @@
 
 #include <iostream>
 #include <iomanip> 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <chrono>
 
 using namespace std;
 
 namespace ORB_SLAM3 {
+
+namespace {
+
+double MetricExpNaN() {
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+double MetricExpQuantile(std::vector<double> values, const double quantile) {
+    if (values.empty()) {
+        return MetricExpNaN();
+    }
+    std::sort(values.begin(), values.end());
+    const size_t index = static_cast<size_t>(std::ceil(
+        quantile * static_cast<double>(values.size() - 1)));
+    return values[index];
+}
+
+std::string MetricExpTrackingStateName(const Tracking::eTrackingState state) {
+    if (state == Tracking::NO_IMAGES_YET) {
+        return "NO_IMAGES_YET";
+    }
+    if (state == Tracking::NOT_INITIALIZED) {
+        return "NOT_INITIALIZED";
+    }
+    if (state == Tracking::OK) {
+        return "OK";
+    }
+    if (state == Tracking::RECENTLY_LOST) {
+        return "RECENTLY_LOST";
+    }
+    if (state == Tracking::LOST) {
+        return "LOST";
+    }
+    if (state == Tracking::OK_KLT) {
+        return "OK_KLT";
+    }
+    return "SYSTEM_NOT_READY";
+}
+
+}  // namespace
 
 Tracking::Tracking(System *pSys, ORBVocabulary *pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase *pKFDB, const string &strSettingPath, const int sensor, Settings *settings, const string &_nameSeq) :
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false), mbSetImgGray(false),
@@ -85,6 +130,53 @@ Tracking::Tracking(System *pSys, ORBVocabulary *pVoc, FrameDrawer *pFrameDrawer,
     lastID = 0;
     mbInitWith3KFs = false;
     mnNumDataset = 0;
+
+    cv::FileStorage metricExpSettings(strSettingPath, cv::FileStorage::READ);
+    bool metricExpEnabled = false;
+    bool metricExp2Enabled = false;
+    bool metricExpDirectionEnabled = false;
+    std::string metricExpOutput;
+    std::string metricExp2Output;
+    if (metricExpSettings.isOpened()) {
+        const cv::FileNode enabledNode = metricExpSettings["metricexp_enable"];
+        if (!enabledNode.empty()) {
+            metricExpEnabled = static_cast<int>(enabledNode) != 0;
+        }
+        const cv::FileNode outputNode = metricExpSettings["metricexp_output"];
+        if (!outputNode.empty() && outputNode.isString()) {
+            metricExpOutput = outputNode.string();
+        }
+        const cv::FileNode metricExp2EnabledNode = metricExpSettings["metricexp2_enable"];
+        if (!metricExp2EnabledNode.empty()) {
+            metricExp2Enabled = static_cast<int>(metricExp2EnabledNode) != 0;
+        }
+        const cv::FileNode metricExpDirectionEnabledNode =
+            metricExpSettings["metricexp_direction_enable"];
+        if (!metricExpDirectionEnabledNode.empty()) {
+            metricExpDirectionEnabled =
+                static_cast<int>(metricExpDirectionEnabledNode) != 0;
+        }
+        const cv::FileNode metricExp2OutputNode = metricExpSettings["metricexp2_output"];
+        if (!metricExp2OutputNode.empty() && metricExp2OutputNode.isString()) {
+            metricExp2Output = metricExp2OutputNode.string();
+        }
+    }
+    mbMetricExp2Enabled = metricExpEnabled && metricExp2Enabled;
+    mbMetricExpDirectionEnabled = mbMetricExp2Enabled && metricExpDirectionEnabled;
+    if (mbMetricExp2Enabled) {
+        metricExpOutput = metricExp2Output;
+    }
+    if (metricExpEnabled) {
+        std::unique_ptr<MetricExpLogger> metricExpLogger(
+            new MetricExpLogger(true, metricExpOutput, mbMetricExp2Enabled,
+                                mbMetricExpDirectionEnabled));
+        if (metricExpLogger->IsEnabled()) {
+            mpMetricExpLogger = std::move(metricExpLogger);
+        } else {
+            std::cerr << "metricexp: unable to create output CSV at '"
+                      << metricExpOutput << "'" << std::endl;
+        }
+    }
 
     vector<GeometricCamera *> vpCams = mpAtlas->GetAllCameras();
     std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
@@ -1403,9 +1495,349 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 #endif
 
     lastID = mCurrentFrame.mnId;
+    if (mpMetricExpLogger) {
+        BeginMetricExpFrame();
+    }
     Track();
+    if (mpMetricExpLogger) {
+        WriteMetricExpFrame();
+    }
 
     return mCurrentFrame.GetPose();
+}
+
+void Tracking::BeginMetricExpFrame() {
+    if (!mpMetricExpLogger) {
+        return;
+    }
+    mvMetricExpCandidates.clear();
+    mMetricExpFrameRecord.Begin(
+        mCurrentFrame.mTimeStamp,
+        mCurrentFrame.mnId);
+}
+
+void Tracking::CaptureMetricExpCandidates() {
+    if (!mpMetricExpLogger) {
+        return;
+    }
+    mvMetricExpCandidates.clear();
+    mvMetricExpCandidates.reserve(mCurrentFrame.N);
+    for (int index = 0; index < mCurrentFrame.N; ++index) {
+        MapPoint *point = mCurrentFrame.mvpMapPoints[index];
+        if (point && !mCurrentFrame.mpCamera2 && mCurrentFrame.mvuRight[index] < 0.0F) {
+            MetricExpCandidate candidate;
+            candidate.index = static_cast<size_t>(index);
+            candidate.point = point;
+            mvMetricExpCandidates.push_back(candidate);
+        }
+    }
+}
+
+void Tracking::FinalizeMetricExpPoseOptimization() {
+    if (!mpMetricExpLogger) {
+        return;
+    }
+
+    MetricExpRecord &record = mMetricExpFrameRecord.MutableRecord();
+
+    record.nMatched = static_cast<long>(mvMetricExpCandidates.size());
+    record.nInlier = 0;
+    record.inlierRatio = MetricExpNaN();
+    record.reprojRmsePx = MetricExpNaN();
+    record.reprojMedianPx = MetricExpNaN();
+    record.reprojP90Px = MetricExpNaN();
+    record.parallaxCount = 0;
+    record.parallaxMedianDeg = MetricExpNaN();
+    record.parallaxP25Deg = MetricExpNaN();
+    record.occupiedGridCount = 0;
+    record.gridOccupancy = MetricExpNaN();
+    if (mbMetricExp2Enabled) {
+        const MetricExpRecord defaultRecord;
+        record.hessianValid = defaultRecord.hessianValid;
+        record.hessianEdgeCount = defaultRecord.hessianEdgeCount;
+        record.hessianRank = defaultRecord.hessianRank;
+        record.hessianRankDeficient = defaultRecord.hessianRankDeficient;
+        record.hessianNegativeEigenvalue = defaultRecord.hessianNegativeEigenvalue;
+        record.hessianRawMinEig = defaultRecord.hessianRawMinEig;
+        record.hessianEig1 = defaultRecord.hessianEig1;
+        record.hessianEig2 = defaultRecord.hessianEig2;
+        record.hessianEig3 = defaultRecord.hessianEig3;
+        record.hessianEig4 = defaultRecord.hessianEig4;
+        record.hessianEig5 = defaultRecord.hessianEig5;
+        record.hessianEig6 = defaultRecord.hessianEig6;
+        record.hessianTrace = defaultRecord.hessianTrace;
+        record.hessianMinTraceRatio = defaultRecord.hessianMinTraceRatio;
+        record.hessianMinMaxRatio = defaultRecord.hessianMinMaxRatio;
+        record.hessianLog10Condition = defaultRecord.hessianLog10Condition;
+        record.transObsValid = defaultRecord.transObsValid;
+        record.transObsNegativeEigenvalue = defaultRecord.transObsNegativeEigenvalue;
+        record.transObsRawMinEig = defaultRecord.transObsRawMinEig;
+        record.transObsEigMin = defaultRecord.transObsEigMin;
+        record.transObsEigMid = defaultRecord.transObsEigMid;
+        record.transObsEigMax = defaultRecord.transObsEigMax;
+        record.transObsTrace = defaultRecord.transObsTrace;
+        record.transObsMinTraceRatio = defaultRecord.transObsMinTraceRatio;
+        record.transObsMinMaxRatio = defaultRecord.transObsMinMaxRatio;
+        record.transObsLog10Condition = defaultRecord.transObsLog10Condition;
+        record.transObsH00 = defaultRecord.transObsH00;
+        record.transObsH01 = defaultRecord.transObsH01;
+        record.transObsH02 = defaultRecord.transObsH02;
+        record.transObsH11 = defaultRecord.transObsH11;
+        record.transObsH12 = defaultRecord.transObsH12;
+        record.transObsH22 = defaultRecord.transObsH22;
+    }
+
+    if (mvMetricExpCandidates.empty()) {
+        return;
+    }
+
+    std::vector<double> reprojectionErrors;
+    std::vector<double> parallaxes;
+    std::vector<bool> occupied(24, false);
+    Eigen::Matrix<double, 6, 6> hessian = Eigen::Matrix<double, 6, 6>::Zero();
+    long hessianEdgeCount = 0;
+    const Sophus::SE3f Tcw = mCurrentFrame.GetPose();
+    KeyFrame *referenceKeyFrame = mCurrentFrame.mpReferenceKF;
+    const bool hasReference = referenceKeyFrame && !referenceKeyFrame->isBad();
+    Eigen::Vector3f currentCenter;
+    Eigen::Vector3f referenceCenter;
+    if (hasReference) {
+        currentCenter = mCurrentFrame.GetCameraCenter();
+        referenceCenter = referenceKeyFrame->GetCameraCenter();
+    }
+
+    for (const MetricExpCandidate &candidate : mvMetricExpCandidates) {
+        if (candidate.index >= mCurrentFrame.mvpMapPoints.size()) {
+            continue;
+        }
+        if (mCurrentFrame.mvpMapPoints[candidate.index] != candidate.point ||
+            mCurrentFrame.mvbOutlier[candidate.index] || candidate.point->isBad()) {
+            continue;
+        }
+        ++record.nInlier;
+
+        const Eigen::Vector3f worldPoint = candidate.point->GetWorldPos();
+        const Eigen::Vector3f cameraPoint = Tcw * worldPoint;
+        if (worldPoint.allFinite() && cameraPoint.allFinite() && cameraPoint.z() > 1.0e-6F) {
+            if (mbMetricExp2Enabled && candidate.index < mCurrentFrame.mvKeysUn.size()) {
+                const int octave = mCurrentFrame.mvKeysUn[candidate.index].octave;
+                if (octave >= 0 && static_cast<size_t>(octave) < mCurrentFrame.mvInvLevelSigma2.size()) {
+                    const double invSigma2 = static_cast<double>(mCurrentFrame.mvInvLevelSigma2[octave]);
+                    if (std::isfinite(invSigma2) && invSigma2 > 0.0) {
+                        const Eigen::Vector3d cameraPointDouble = cameraPoint.cast<double>();
+                        const Eigen::Matrix<double, 2, 3> projectionJacobian =
+                            mCurrentFrame.mpCamera->projectJac(cameraPointDouble);
+                        if (projectionJacobian.array().isFinite().all()) {
+                            Eigen::Matrix<double, 3, 6> se3Derivative;
+                            se3Derivative << 0.0, cameraPointDouble.z(), -cameraPointDouble.y(), 1.0, 0.0, 0.0,
+                                -cameraPointDouble.z(), 0.0, cameraPointDouble.x(), 0.0, 1.0, 0.0,
+                                cameraPointDouble.y(), -cameraPointDouble.x(), 0.0, 0.0, 0.0, 1.0;
+                            const Eigen::Matrix<double, 2, 6> jacobian =
+                                -projectionJacobian * se3Derivative;
+                            hessian.noalias() += invSigma2 * jacobian.transpose() * jacobian;
+                            ++hessianEdgeCount;
+                        }
+                    }
+                }
+            }
+            const Eigen::Vector2f projection = mCurrentFrame.mpCamera->project(cameraPoint);
+            const cv::Point2f observation = mCurrentFrame.mvKeysUn[candidate.index].pt;
+            const double errorX = static_cast<double>(projection.x() - observation.x);
+            const double errorY = static_cast<double>(projection.y() - observation.y);
+            const double reprojectionError = std::sqrt(errorX * errorX + errorY * errorY);
+            if (std::isfinite(reprojectionError)) {
+                reprojectionErrors.push_back(reprojectionError);
+            }
+        }
+
+        if (hasReference && candidate.point->IsInKeyFrame(referenceKeyFrame) &&
+            worldPoint.allFinite()) {
+            const Eigen::Vector3f currentRay = worldPoint - currentCenter;
+            const Eigen::Vector3f referenceRay = worldPoint - referenceCenter;
+            const float currentNorm = currentRay.norm();
+            const float referenceNorm = referenceRay.norm();
+            if (currentNorm > 1.0e-6F && referenceNorm > 1.0e-6F) {
+                float cosine = currentRay.dot(referenceRay) / (currentNorm * referenceNorm);
+                if (cosine > 1.0F) {
+                    cosine = 1.0F;
+                }
+                if (cosine < -1.0F) {
+                    cosine = -1.0F;
+                }
+                const double angleDegrees = static_cast<double>(std::acos(cosine)) *
+                    180.0 / 3.14159265358979323846;
+                if (std::isfinite(angleDegrees)) {
+                    parallaxes.push_back(angleDegrees);
+                }
+            }
+        }
+
+        const cv::Point2f point = mCurrentFrame.mvKeysUn[candidate.index].pt;
+        const float width = Frame::mnMaxX - Frame::mnMinX;
+        const float height = Frame::mnMaxY - Frame::mnMinY;
+        if (width > 0.0F && height > 0.0F && point.x >= Frame::mnMinX &&
+            point.x <= Frame::mnMaxX && point.y >= Frame::mnMinY && point.y <= Frame::mnMaxY) {
+            int column = static_cast<int>((point.x - Frame::mnMinX) * 6.0F / width);
+            int row = static_cast<int>((point.y - Frame::mnMinY) * 4.0F / height);
+            if (column >= 6) {
+                column = 5;
+            }
+            if (row >= 4) {
+                row = 3;
+            }
+            if (column >= 0 && row >= 0) {
+                occupied[static_cast<size_t>(row * 6 + column)] = true;
+            }
+        }
+    }
+
+    if (mbMetricExp2Enabled) {
+        const MetricExpHessianSummary hessianSummary =
+            SummarizeMetricExpHessian(hessian, hessianEdgeCount);
+        record.hessianValid = hessianSummary.valid;
+        record.hessianEdgeCount = hessianEdgeCount;
+        record.hessianRank = hessianSummary.rank;
+        record.hessianRankDeficient = hessianSummary.rankDeficient;
+        record.hessianNegativeEigenvalue = hessianSummary.negativeEigenvalue;
+        record.hessianRawMinEig = hessianSummary.rawMinEigenvalue;
+        record.hessianEig1 = hessianSummary.eigenvalues(0);
+        record.hessianEig2 = hessianSummary.eigenvalues(1);
+        record.hessianEig3 = hessianSummary.eigenvalues(2);
+        record.hessianEig4 = hessianSummary.eigenvalues(3);
+        record.hessianEig5 = hessianSummary.eigenvalues(4);
+        record.hessianEig6 = hessianSummary.eigenvalues(5);
+        record.hessianTrace = hessianSummary.trace;
+        record.hessianMinTraceRatio = hessianSummary.minTraceRatio;
+        record.hessianMinMaxRatio = hessianSummary.minMaxRatio;
+        record.hessianLog10Condition = hessianSummary.log10Condition;
+
+        const MetricExpTransObservabilitySummary transSummary =
+            SummarizeMetricExpTransObservability(hessian);
+        record.transObsValid = transSummary.valid;
+        record.transObsNegativeEigenvalue = transSummary.negativeEigenvalue;
+        record.transObsRawMinEig = transSummary.rawMinEigenvalue;
+        record.transObsEigMin = transSummary.eigenvalues(0);
+        record.transObsEigMid = transSummary.eigenvalues(1);
+        record.transObsEigMax = transSummary.eigenvalues(2);
+        record.transObsTrace = transSummary.trace;
+        record.transObsMinTraceRatio = transSummary.minTraceRatio;
+        record.transObsMinMaxRatio = transSummary.minMaxRatio;
+        record.transObsLog10Condition = transSummary.log10Condition;
+        if (mbMetricExpDirectionEnabled) {
+            record.transObsH00 = transSummary.matrix(0, 0);
+            record.transObsH01 = transSummary.matrix(0, 1);
+            record.transObsH02 = transSummary.matrix(0, 2);
+            record.transObsH11 = transSummary.matrix(1, 1);
+            record.transObsH12 = transSummary.matrix(1, 2);
+            record.transObsH22 = transSummary.matrix(2, 2);
+        }
+    }
+
+    record.inlierRatio = static_cast<double>(record.nInlier) /
+        static_cast<double>(record.nMatched);
+    if (!reprojectionErrors.empty()) {
+        double squaredErrorSum = 0.0;
+        for (const double error : reprojectionErrors) {
+            squaredErrorSum += error * error;
+        }
+        record.reprojRmsePx = std::sqrt(
+            squaredErrorSum / static_cast<double>(reprojectionErrors.size()));
+        record.reprojMedianPx = MetricExpQuantile(reprojectionErrors, 0.5);
+        record.reprojP90Px = MetricExpQuantile(reprojectionErrors, 0.9);
+    }
+    record.parallaxCount = static_cast<long>(parallaxes.size());
+    if (!parallaxes.empty()) {
+        record.parallaxMedianDeg = MetricExpQuantile(parallaxes, 0.5);
+        record.parallaxP25Deg = MetricExpQuantile(parallaxes, 0.25);
+    }
+    for (const bool cellOccupied : occupied) {
+        if (cellOccupied) {
+            ++record.occupiedGridCount;
+        }
+    }
+    record.gridOccupancy =
+        static_cast<double>(record.occupiedGridCount) / 24.0;
+}
+
+int Tracking::RunPoseOptimizationWithMetricExp() {
+    if (!mpMetricExpLogger) {
+        return Optimizer::PoseOptimization(&mCurrentFrame);
+    }
+    CaptureMetricExpCandidates();
+    const int inliers = Optimizer::PoseOptimization(&mCurrentFrame);
+    FinalizeMetricExpPoseOptimization();
+    return inliers;
+}
+
+int Tracking::RunPoseInertialOptimizationLastFrameWithMetricExp() {
+    if (!mpMetricExpLogger) {
+        return Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame);
+    }
+    CaptureMetricExpCandidates();
+    const int inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame);
+    FinalizeMetricExpPoseOptimization();
+    return inliers;
+}
+
+int Tracking::RunPoseInertialOptimizationLastKeyFrameWithMetricExp() {
+    if (!mpMetricExpLogger) {
+        return Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame);
+    }
+    CaptureMetricExpCandidates();
+    const int inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame);
+    FinalizeMetricExpPoseOptimization();
+    return inliers;
+}
+
+void Tracking::FinalizeMetricExpFrame() {
+    if (!mpMetricExpLogger) {
+        return;
+    }
+
+    if (!mMetricExpFrameRecord.IsActive() ||
+        mMetricExpFrameRecord.IsFinalized()) {
+        return;
+    }
+
+    MetricExpRecord snapshot = mMetricExpFrameRecord.GetRecord();
+    snapshot.trackingState = MetricExpTrackingStateName(mState);
+    snapshot.referenceKeyFrameId = -1;
+    snapshot.poseValid = false;
+    snapshot.tx = MetricExpNaN();
+    snapshot.ty = MetricExpNaN();
+    snapshot.tz = MetricExpNaN();
+    snapshot.qx = MetricExpNaN();
+    snapshot.qy = MetricExpNaN();
+    snapshot.qz = MetricExpNaN();
+    snapshot.qw = MetricExpNaN();
+    if (mCurrentFrame.mpReferenceKF) {
+        snapshot.referenceKeyFrameId = static_cast<long>(mCurrentFrame.mpReferenceKF->mnId);
+    }
+    const bool stateAllowsTrajectoryPose =
+        mState == OK || mState == RECENTLY_LOST;
+    if (stateAllowsTrajectoryPose && mCurrentFrame.isSet() &&
+        mCurrentFrame.mpReferenceKF) {
+        const Sophus::SE3f Tcw = mCurrentFrame.GetPose();
+        const Eigen::Quaternionf quaternion = Tcw.unit_quaternion();
+        const Eigen::Vector3f translation = Tcw.translation();
+        snapshot.poseValid = true;
+        snapshot.tx = translation.x();
+        snapshot.ty = translation.y();
+        snapshot.tz = translation.z();
+        snapshot.qx = quaternion.x();
+        snapshot.qy = quaternion.y();
+        snapshot.qz = quaternion.z();
+        snapshot.qw = quaternion.w();
+    }
+    mMetricExpFrameRecord.Finalize(snapshot);
+}
+
+void Tracking::WriteMetricExpFrame() {
+    if (!mpMetricExpLogger) {
+        return;
+    }
+    FinalizeMetricExpFrame();
+    mMetricExpFrameRecord.Flush(*mpMetricExpLogger);
 }
 
 void Tracking::GrabImuData(const IMU::Point &imuMeasurement) {
@@ -2314,6 +2746,7 @@ void Tracking::CreateInitialMapMonocular() { //初始化成功后，使用三角
 }
 
 void Tracking::CreateMapInAtlas() {
+    FinalizeMetricExpFrame();
     mnLastInitFrameId = mCurrentFrame.mnId;
     mpAtlas->CreateNewMap();
     if (mSensor == System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
@@ -2385,7 +2818,7 @@ bool Tracking::TrackReferenceKeyFrame() {
     //mCurrentFrame.PrintPointDistribution();
 
     // cout << " TrackReferenceKeyFrame mLastFrame.mTcw:  " << mLastFrame.mTcw << endl;
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    RunPoseOptimizationWithMetricExp();
 
     // Discard outliers
     int nmatchesMap = 0;
@@ -2525,7 +2958,7 @@ bool Tracking::TrackWithMotionModel() {
     }
 
     // Optimize frame pose with all matches
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    RunPoseOptimizationWithMetricExp();
 
     // Discard outliers
     int nmatchesMap = 0;
@@ -2577,21 +3010,20 @@ bool Tracking::TrackLocalMap() {
         }
 
     int inliers;
-    if (!mpAtlas->isImuInitialized())
-        Optimizer::PoseOptimization(&mCurrentFrame);
-    else {
+    if (!mpAtlas->isImuInitialized()) {
+        RunPoseOptimizationWithMetricExp();
+    } else {
         if (mCurrentFrame.mnId <= mnLastRelocFrameId + mnFramesToResetIMU) {
             Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
-            Optimizer::PoseOptimization(&mCurrentFrame);
+            RunPoseOptimizationWithMetricExp();
         } else {
             // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
-            if (!mbMapUpdated) //  && (mnMatchesInliers>30))
-            {
+            if (!mbMapUpdated) { //  && (mnMatchesInliers>30))
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                inliers = RunPoseInertialOptimizationLastFrameWithMetricExp(); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             } else {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
-                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                inliers = RunPoseInertialOptimizationLastKeyFrameWithMetricExp(); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
         }
     }
@@ -3369,7 +3801,7 @@ bool Tracking::Relocalization() {
                         mCurrentFrame.mvpMapPoints[j] = NULL;
                 }
 
-                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                int nGood = RunPoseOptimizationWithMetricExp();
 
                 if (nGood < 10)
                     continue;
@@ -3383,7 +3815,7 @@ bool Tracking::Relocalization() {
                     int nadditional = matcher2.SearchByProjection(mCurrentFrame, vpCandidateKFs[i], sFound, 10, 100);
 
                     if (nadditional + nGood >= 50) {
-                        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                        nGood = RunPoseOptimizationWithMetricExp();
 
                         // If many inliers but still not enough, search by projection again in a narrower window
                         // the camera has been already optimized with many points
@@ -3396,7 +3828,7 @@ bool Tracking::Relocalization() {
 
                             // Final optimization
                             if (nGood + nadditional >= 50) {
-                                nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+                                nGood = RunPoseOptimizationWithMetricExp();
 
                                 for (int io = 0; io < mCurrentFrame.N; io++)
                                     if (mCurrentFrame.mvbOutlier[io])
@@ -3425,6 +3857,7 @@ bool Tracking::Relocalization() {
 }
 
 void Tracking::Reset(bool bLocMap) {
+    FinalizeMetricExpFrame();
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if (mpViewer) {
@@ -3482,6 +3915,7 @@ void Tracking::Reset(bool bLocMap) {
 }
 
 void Tracking::ResetActiveMap(bool bLocMap) {
+    FinalizeMetricExpFrame();
     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
     if (mpViewer) {
         mpViewer->RequestStop();

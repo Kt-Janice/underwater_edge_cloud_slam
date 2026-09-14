@@ -37,16 +37,16 @@ Camera.type: "PinHole"
 # Source: AMtown.yaml
 # ============================
 
-# Camera1.fx: 1453.72
-# Camera1.fy: 1453.28
-# Camera1.cx: 1172.18
-# Camera1.cy: 1041.78
-#
-# Camera1.k1: -0.1210
-# Camera1.k2: 0.1113
-# Camera1.p1: 0.0016
-# Camera1.p2: 0.00013
-# Camera1.k3: -0.062353
+Camera1.fx: 1453.88
+Camera1.fy: 1452.85
+Camera1.cx: 1182.53
+Camera1.cy: 1045.82
+
+Camera1.k1: -0.052
+Camera1.k2: 0.1168
+Camera1.p1: 0.0015
+Camera1.p2: 0.00013
+Camera1.k3: -0.068564
 
 
 # ============================
@@ -55,16 +55,17 @@ Camera.type: "PinHole"
 # Source: HKairport.yaml
 # ============================
 
-Camera1.fx: 1451.28
-Camera1.fy: 1451.29
-Camera1.cx: 1177.5
-Camera1.cy: 1043.5
+# Camera1.fx: 1451.28
+# Camera1.fy: 1451.29
+# Camera1.cx: 1177.5
+# Camera1.cy: 1043.5
 
-Camera1.k1: -0.0572
-Camera1.k2: 0.1209
-Camera1.p1: 0.00124
-Camera1.p2: -0.00018
-Camera1.k3: -0.06327
+# Camera1.k1: -0.0572
+# Camera1.k2: 0.1209
+# Camera1.p1: 0.00124
+# Camera1.p2: -0.00018
+# Camera1.k3: -0.06327
+
 
 
 # Original MARS-LVIG image size
@@ -189,6 +190,17 @@ ORBextractor.nLevels: 8
 # FAST thresholds
 ORBextractor.iniThFAST: 20
 ORBextractor.minThFAST: 7
+
+
+#--------------------------------------------------------------------------------------------
+# Offline metricexp instrumentation (disabled by default)
+#--------------------------------------------------------------------------------------------
+
+metricexp_enable: 0
+metricexp_output: "/home/lhf/output/metricexp_holdout/HKairport02/orb_tracking_metrics.csv"
+metricexp2_enable: 0
+metricexp2_output: "/home/lhf/output/metricexp_holdout/HKairport02/orb_tracking_metrics.csv"
+metricexp_direction_enable: 0
 
 
 #--------------------------------------------------------------------------------------------

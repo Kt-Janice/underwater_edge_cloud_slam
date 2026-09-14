@@ -28,6 +28,12 @@
 
 File.version: "1.0"
 
+# metricexp is disabled by default and has no effect on normal tracking.
+metricexp_enable: false
+metricexp_output: "/home/lhf/output/metricexp/orb_tracking_metrics.csv"
+metricexp2_enable: false
+metricexp2_output: "/home/lhf/output/metricexp2/orb_tracking_metrics.csv"
+
 Camera.type: "PinHole"
 
 # KLU1 navigation camera, radtan model

@@ -67,3 +67,8 @@ CATKIN_IGNORE
 /trans_others/
 /trans_point/
 /trans_pth/
+
+# Local cloud_edge_slam tests, CTest output, and offline analysis artifacts.
+/src/cloud_edge_slam/test/
+/src/cloud_edge_slam/Testing/
+/src/cloud_edge_slam/tools/

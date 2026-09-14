@@ -4,8 +4,14 @@
     <!-- <arg name="dataset_name" default="AMtown01" />
     <arg name="image_topic" default="/left_camera/image/compressed" /> -->
 
-    <arg name="dataset_name" default="HKairport01" />
+    <arg name="dataset_name" default="AMtown02" />
     <arg name="image_topic" default="/left_camera/image/compressed" />
+
+    <!-- <arg name="dataset_name" default="HKairport01" />
+    <arg name="image_topic" default="/left_camera/image/compressed" /> -->
+
+    <!-- <arg name="dataset_name" default="HKairport02" />
+    <arg name="image_topic" default="/left_camera/image/compressed" /> -->
     <arg name="orb3_mode" default="mono" />
     <!-- <arg name="orb3_mode" default="mono_imu" /> -->
     <arg name="imu_topic" default="/livox/imu" />

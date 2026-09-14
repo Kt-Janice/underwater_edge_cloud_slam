@@ -37,10 +37,12 @@
 #include "ImuTypes.h"
 #include "Settings.h"
 #include "CloudImageSampler.h"
+#include "MetricExpLogger.h"
 
 #include "GeometricCamera.h"
 
 #include <mutex>
+#include <memory>
 #include <unordered_set>
 
 namespace ORB_SLAM3 {
@@ -237,6 +239,15 @@ protected:
     bool TrackLocalMap();
     void SearchLocalPoints();
 
+    int RunPoseOptimizationWithMetricExp();
+    int RunPoseInertialOptimizationLastFrameWithMetricExp();
+    int RunPoseInertialOptimizationLastKeyFrameWithMetricExp();
+    void BeginMetricExpFrame();
+    void CaptureMetricExpCandidates();
+    void FinalizeMetricExpPoseOptimization();
+    void FinalizeMetricExpFrame();
+    void WriteMetricExpFrame();
+
     bool NeedNewKeyFrame();
     void CreateNewKeyFrame();
 
@@ -361,6 +372,17 @@ protected:
     //int nMapChangeIndex;
 
     int mnNumDataset;
+
+    struct MetricExpCandidate {
+        size_t index;
+        MapPoint *point;
+    };
+
+    std::unique_ptr<MetricExpLogger> mpMetricExpLogger;
+    bool mbMetricExp2Enabled;
+    bool mbMetricExpDirectionEnabled;
+    std::vector<MetricExpCandidate> mvMetricExpCandidates;
+    MetricExpFrameRecord mMetricExpFrameRecord;
 
     ofstream f_track_stats;
 

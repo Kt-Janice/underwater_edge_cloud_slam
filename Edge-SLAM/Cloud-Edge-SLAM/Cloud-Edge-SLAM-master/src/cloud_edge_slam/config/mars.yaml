@@ -16,32 +16,34 @@ File.version: "1.0"
 Camera.type: "PinHole"
 
 # amtown
-# Camera1.fx: 1453.72
-# Camera1.fy: 1453.28
-# Camera1.cx: 1172.18
-# Camera1.cy: 1041.78
+Camera1.fx: 1453.72
+Camera1.fy: 1453.28
+Camera1.cx: 1172.18
+Camera1.cy: 1041.78
 
-# Camera1.k1: -0.1210
-# Camera1.k2: 0.1113
-# Camera1.p1: 0.0016
-# Camera1.p2: 0.00013
-
-# Camera.width: 2448
-# Camera.height: 2048
-
-# hkairport
-Camera1.fx: 1451.28
-Camera1.fy: 1451.29
-Camera1.cx: 1177.5
-Camera1.cy: 1043.5
-
-Camera1.k1: -0.0572
-Camera1.k2: 0.1209
-Camera1.p1: 0.00124
-Camera1.p2: -0.00018
+Camera1.k1: -0.1210
+Camera1.k2: 0.1113
+Camera1.p1: 0.0016
+Camera1.p2: 0.00013
+Camera1.k3: -0.062353
 
 Camera.width: 2448
 Camera.height: 2048
+
+# hkairport
+# Camera1.fx: 1451.28
+# Camera1.fy: 1451.29
+# Camera1.cx: 1177.5
+# Camera1.cy: 1043.5
+
+# Camera1.k1: -0.0572
+# Camera1.k2: 0.1209
+# Camera1.p1: 0.00124
+# Camera1.p2: -0.00018
+# Camera1.k3: -0.06327
+
+# Camera.width: 2448
+# Camera.height: 2048
 
 Camera.newWidth: 1224
 Camera.newHeight: 1024

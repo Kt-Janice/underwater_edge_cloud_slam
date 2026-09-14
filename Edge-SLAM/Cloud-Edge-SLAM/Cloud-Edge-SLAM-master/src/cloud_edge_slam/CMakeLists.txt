@@ -219,6 +219,8 @@ set(CLOUD_EDGE_COMMON_SOURCES
   lib_src/CloudMergeTicket.cc
   lib_src/CloudUploadTransactionGate.cc
   lib_src/BackendWriteController.cc
+  lib_src/MetricExpLogger.cc
+  lib_src/MetricExpObservability.cc
   lib_src/Tracking.cc
   lib_src/LocalMapping.cc
   lib_src/LoopClosing.cc
@@ -439,6 +441,16 @@ target_link_libraries(cloud_edge_node
 catkin_add_gtest(test_runtime_environment test/test_runtime_environment.cpp)
 if(TARGET test_runtime_environment)
   target_link_libraries(test_runtime_environment gtest_main cloud_edge_sla_lib)
+endif()
+
+catkin_add_gtest(test_metric_exp_logger test/test_metric_exp_logger.cpp)
+if(TARGET test_metric_exp_logger)
+  target_link_libraries(test_metric_exp_logger gtest_main cloud_edge_sla_lib)
+endif()
+
+catkin_add_gtest(test_metric_exp_observability test/test_metric_exp_observability.cpp)
+if(TARGET test_metric_exp_observability)
+  target_link_libraries(test_metric_exp_observability gtest_main cloud_edge_sla_lib)
 endif()
 
 catkin_add_gtest(test_land_air_kfd_episode test/test_land_air_kfd_episode.cpp)
