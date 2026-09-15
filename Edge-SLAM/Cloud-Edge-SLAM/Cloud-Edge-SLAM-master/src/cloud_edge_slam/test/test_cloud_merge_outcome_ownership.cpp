@@ -373,9 +373,12 @@ int main(int argc, char **argv) {
     const std::string seaBody = ExtractFunction(
         source,
         "CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(");
-    const std::string landAirBody = ExtractFunction(
+    const std::string landBody = ExtractFunction(
         source,
-        "CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(");
+        "CloudMergeExecutionResult CloudMerging::RunLandCloudMerge(");
+    const std::string airBody = ExtractFunction(
+        source,
+        "CloudMergeExecutionResult CloudMerging::RunAirCloudMerge(");
     const std::string cleanupBody = ExtractFunction(
         source,
         "void CloudMerging::ApplyCloudMapCleanup(");
@@ -388,14 +391,23 @@ int main(int argc, char **argv) {
 
     passed &= Require(!runBody.empty(), "public Run() must exist");
     passed &= Require(!seaBody.empty(), "sea strategy must exist");
-    passed &= Require(!landAirBody.empty(), "land/air strategy must exist");
+    passed &= Require(!landBody.empty(), "land strategy must exist");
+    passed &= Require(!airBody.empty(), "air strategy must exist");
     passed &= Require(!cleanupBody.empty(), "cleanup function must exist");
     passed &= Require(!insertionBody.empty(), "ticket insertion must exist");
     passed &= Require(!cancellationBody.empty(), "queue cancellation must exist");
 
     passed &= Require(
-        seaBody.find("RunLandAirCloudMerge") == std::string::npos,
-        "sea strategy must not delegate to land/air strategy");
+        seaBody.find("ComputeLandSubmapSim3") == std::string::npos,
+        "sea strategy must not use land-only geometry");
+    passed &= Require(
+        airBody.find("MERGE_NOT_IMPLEMENTED_AIR") != std::string::npos &&
+            airBody.find("CloudMapCleanupAction::DELETE_CLOUD_MAP") !=
+                std::string::npos,
+        "air strategy must return explicit non-success and cleanup action");
+    passed &= Require(
+        airBody.find("delete ") == std::string::npos,
+        "air strategy must leave map deletion to unified cleanup");
     passed &= Require(
         runBody.find(
             "ApplyCloudMapCleanup(pending, executionResult.cleanupAction)") !=
@@ -420,7 +432,8 @@ int main(int argc, char **argv) {
         "cleanup must clear ownership after deletion");
     passed &= Require(
         seaBody.find("delete mpCurrentCloudMap") == std::string::npos &&
-            landAirBody.find("delete mpCurrentCloudMap") == std::string::npos,
+            landBody.find("delete mpCurrentCloudMap") == std::string::npos &&
+            airBody.find("delete mpCurrentCloudMap") == std::string::npos,
         "strategies must not delete through the non-owning current-map alias");
     passed &= Require(
         insertionBody.find("CloudMapCleanupAction::DELETE_CLOUD_MAP") !=
@@ -433,7 +446,7 @@ int main(int argc, char **argv) {
     passed &= Require(
         seaBody.find("catch (const std::exception &exception)") !=
                 std::string::npos &&
-            landAirBody.find("catch (const std::exception &exception)") !=
+            landBody.find("catch (const std::exception &exception)") !=
                 std::string::npos,
         "both strategies must map exceptions to explicit outcomes");
     passed &= Require(

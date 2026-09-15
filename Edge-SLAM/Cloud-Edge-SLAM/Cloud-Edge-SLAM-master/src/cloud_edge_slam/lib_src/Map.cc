@@ -20,6 +20,7 @@
 #include "KeyFrame.h"
 
 #include <cmath>
+#include <algorithm>
 #include <mutex>
 
 namespace ORB_SLAM3 {
@@ -203,6 +204,7 @@ vector<MapPoint *> Map::GetReferenceMapPoints() {
 }
 
 long unsigned int Map::GetId() {
+    unique_lock<mutex> lock(mMutexMapIdentity);
     return mnId;
 }
 long unsigned int Map::GetInitKFid() {
@@ -381,7 +383,33 @@ bool Map::GetIniertialBA2() {
 }
 
 void Map::ChangeId(long unsigned int nId) {
+    unique_lock<mutex> lock(mMutexMapIdentity);
     mnId = nId;
+}
+
+bool Map::HasMergedMapId(unsigned long id) const {
+    unique_lock<mutex> lock(mMutexMapIdentity);
+    return std::find(mvMergedMapIds.begin(), mvMergedMapIds.end(), id) !=
+           mvMergedMapIds.end();
+}
+
+void Map::AddMergedMapId(unsigned long id) {
+    unique_lock<mutex> lock(mMutexMapIdentity);
+    mvMergedMapIds.push_back(id);
+}
+
+void Map::PreserveMergedMapIdentity(
+    unsigned long previousId,
+    unsigned long newId) {
+    unique_lock<mutex> lock(mMutexMapIdentity);
+    if (previousId != newId &&
+        std::find(
+            mvMergedMapIds.begin(),
+            mvMergedMapIds.end(),
+            previousId) == mvMergedMapIds.end()) {
+        mvMergedMapIds.push_back(previousId);
+    }
+    mnId = newId;
 }
 
 unsigned int Map::GetLowerKFID() {

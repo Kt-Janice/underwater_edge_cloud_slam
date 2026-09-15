@@ -1868,6 +1868,9 @@ void CloudMerging::Run(bool bOnline) {
 
                 // Merge !!!
                 CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
+                mpAtlas->AddMergedMapId(
+                    mpCurrentEdgeFrontMap,
+                    mpCurrentCloudMap->GetId());
 
                 mpAtlas->RemoveBadMaps();
 
@@ -2188,13 +2191,18 @@ void CloudMerging::Run(bool bOnline) {
 
                     // Merge !!!
                     CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
+                    mpAtlas->AddMergedMapId(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap->GetId());
 
                     delete mpCurrentCloudMap; 
                     
                     if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
                         mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
                     }
-                    mpCurrentEdgeFrontMap->ChangeId(mpCurrentEdgeBackMap->GetId());
+                    mpAtlas->ChangeMapId(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap->GetId());
                     mpCurrentEdgeFrontMap->ResetHaveMerged();
 
                     mpAtlas->SetMapBad(mpCurrentEdgeBackMap);
@@ -3277,7 +3285,6 @@ void CloudMerging::CloudMergeMap(
         pMainMap->IncreaseChangeIndex();
 
         std::cerr << "[Merge]: merging maps finished" << std::endl;
-        pMainMap->mvMergedMapIds.push_back(pMergedMap->GetId());
     }
 
     auto logParentChainBreak = [](const std::string &reason,

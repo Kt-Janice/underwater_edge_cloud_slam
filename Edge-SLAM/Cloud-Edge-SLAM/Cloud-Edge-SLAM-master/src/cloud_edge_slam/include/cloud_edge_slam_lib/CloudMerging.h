@@ -31,6 +31,7 @@ class Map;
 class MapDrawer;
 class FrameDrawer;
 class System;
+class CloudMergingLandGeometryTestAccess;
 
 enum class CloudMapCleanupAction {
     NONE,
@@ -127,6 +128,22 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
 protected:
+    enum class LandGeometryStage {
+        FRONT_CLOUD,
+        COMBINED_BACK
+    };
+
+    struct LandGeometryDiagnostics {
+        std::size_t matchedKeyFrameCount = 0;
+        std::size_t selectedKeyFrameCount = 0;
+        double estimatedScale = 1.0;
+        float visualInlierRatio = 0.0F;
+        bool newUdf = false;
+        bool icpExecuted = false;
+        bool icpConverged = false;
+        bool accepted = false;
+    };
+
     bool CheckNewCloudMap(bool bOnline);
     void CompleteCloudMap(const CloudMergeTicketPtr &ticket, CloudMergeOutcome outcome, const std::string &detail);
     void CancelPendingCloudMaps(CloudMergeOutcome outcome, const std::string &detail);
@@ -143,6 +160,32 @@ protected:
         bool mbNewUdf,
         bool mbedge_merge
     );
+
+    static bool ComputeLandSubmapSim3(
+        Map *pMap1, Map *pMap2, const std::map<int, int> &kfMatch12,
+        const std::map<int, int> &randSelectKfMatch12,
+        bool bFixScale,
+        g2o::Sim3 &gSw1w2,
+        std::map<KeyFrame *, std::vector<std::pair<int, int>>> &matchedKeyPoints12,
+        MapDrawer *pMapDrawer,
+        bool newUdf,
+        LandGeometryStage stage,
+        LandGeometryDiagnostics *diagnostics);
+
+    static bool ComputeLandVisualSim3FromCenters(
+        const std::vector<Eigen::Vector3d> &map1Centers,
+        const std::vector<Eigen::Vector3d> &map2Centers,
+        g2o::Sim3 &gSw1w2);
+
+    static g2o::Sim3 ComposeLandRigidIcpRefinement(
+        const g2o::Sim3 &visualSim3,
+        const Eigen::Matrix4d &rigidIcpTransform);
+
+    static Eigen::Matrix4d AccumulateLandRigidIcpTransform(
+        const Eigen::Matrix4d &accumulatedRigidTransform,
+        const Eigen::Matrix4d &currentRigidTransform);
+
+    static bool IsLandVisualGeometryAccepted(float visualInlierRatio);
 
     // Methods to implement the new place recognition algorithm
     bool NewDetectCommonRegions();
@@ -217,10 +260,18 @@ protected:
     RuntimeEnvironment mRuntimeEnvironment = RuntimeEnvironment::LAND;
 
     CloudMergeExecutionResult RunSeaCloudMerge(PendingCloudMap &pending);
-    CloudMergeExecutionResult RunLandAirCloudMerge(PendingCloudMap &pending);
+    CloudMergeExecutionResult RunLandCloudMerge(PendingCloudMap &pending);
+    CloudMergeExecutionResult RunAirCloudMerge(PendingCloudMap &pending);
     void ApplyCloudMapCleanup(
         PendingCloudMap &pending,
         CloudMapCleanupAction cleanupAction);
+    void ReleaseLandSamplingReservations(
+        const PendingCloudMap &pending) noexcept;
+    void CommitLandRetainedMapIdentityHandoff(
+        Map *pRetainedMap,
+        Map *pMergedMap,
+        unsigned long previousId,
+        unsigned long newId);
 
     // Start Cloud variables
     Map *mpCurrentCloudMap;
@@ -257,6 +308,8 @@ protected:
 
     bool mbWork;
     bool mbMergeAnyway;
+
+    friend class CloudMergingLandGeometryTestAccess;
 
     bool mbOldUdf; //cap-udf
     bool mbNewUdf;

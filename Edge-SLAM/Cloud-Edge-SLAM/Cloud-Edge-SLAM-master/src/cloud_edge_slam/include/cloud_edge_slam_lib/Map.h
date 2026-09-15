@@ -41,7 +41,10 @@ class Map {
 
     template <class Archive>
     void serialize(Archive &ar, const unsigned int version) {
-        ar &mnId;
+        {
+            std::lock_guard<std::mutex> lock(mMutexMapIdentity);
+            ar &mnId;
+        }
         ar &mnInitKFid;
         ar &mnMaxKFid;
         ar &mnBigChangeIdx;
@@ -140,6 +143,11 @@ public:
     void PrintEssentialGraph();
     bool CheckEssentialGraph();
     void ChangeId(long unsigned int nId);
+    bool HasMergedMapId(unsigned long id) const;
+    void AddMergedMapId(unsigned long id);
+    void PreserveMergedMapIdentity(
+        unsigned long previousId,
+        unsigned long newId);
 
     unsigned int GetLowerKFID();
 
@@ -177,6 +185,9 @@ public:
 
 protected:
     long unsigned int mnId;
+
+    // Identity is queried by Atlas independently of map geometry updates.
+    mutable std::mutex mMutexMapIdentity;
 
     std::set<MapPoint *> mspMapPoints;
     std::set<KeyFrame *> mspKeyFrames;

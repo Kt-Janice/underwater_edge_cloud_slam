@@ -38,6 +38,7 @@
 #include <Eigen/src/Core/Matrix.h>
 #include <Eigen/SVD>
 #include <algorithm>
+#include <cassert>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -102,61 +103,6 @@ constexpr double kCloudMergeSim3MaxBoundaryGap = 0.05;
 // [Sim3合并实验] 防止数值异常的尺度范围。
 constexpr double kCloudMergeSim3MinScale = 0.01;
 constexpr double kCloudMergeSim3MaxScale = 100.0;
-
-// 将 ticket 终态转换为稳定的终端文本，避免仅打印不可读的枚举整数。
-const char *CloudMergeOutcomeToString(const CloudMergeOutcome outcome) {
-    switch (outcome) {
-        case CloudMergeOutcome::PENDING: {
-            return "PENDING";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_COMPLETED: {
-            return "MERGED_REPLAY_COMPLETED";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_SKIPPED_LOST: {
-            return "MERGED_REPLAY_SKIPPED_LOST";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_SKIPPED_SHUTDOWN: {
-            return "MERGED_REPLAY_SKIPPED_SHUTDOWN";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_WARNING: {
-            return "MERGED_REPLAY_ABORTED_WARNING";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_LOST: {
-            return "MERGED_REPLAY_ABORTED_LOST";
-        }
-        case CloudMergeOutcome::MERGED_REPLAY_ABORTED_SHUTDOWN: {
-            return "MERGED_REPLAY_ABORTED_SHUTDOWN";
-        }
-        case CloudMergeOutcome::MERGE_COMPLETED_LAND_AIR: {
-            return "MERGE_COMPLETED_LAND_AIR";
-        }
-        case CloudMergeOutcome::MERGE_SKIPPED_BACKEND_BLOCK: {
-            return "MERGE_SKIPPED_BACKEND_BLOCK";
-        }
-        case CloudMergeOutcome::MERGE_SKIPPED_SIM3_FAILURE: {
-            return "MERGE_SKIPPED_SIM3_FAILURE";
-        }
-        case CloudMergeOutcome::MERGE_SKIPPED_EDGE_MAP_MISSING: {
-            return "MERGE_SKIPPED_EDGE_MAP_MISSING";
-        }
-        case CloudMergeOutcome::MERGE_SKIPPED_MATCH_FAILURE: {
-            return "MERGE_SKIPPED_MATCH_FAILURE";
-        }
-        case CloudMergeOutcome::MERGE_SKIPPED_INVALID_MAP: {
-            return "MERGE_SKIPPED_INVALID_MAP";
-        }
-        case CloudMergeOutcome::PARTIAL_FAILURE_AFTER_CORRECTION: {
-            return "PARTIAL_FAILURE_AFTER_CORRECTION";
-        }
-        case CloudMergeOutcome::CANCELLED_SHUTDOWN: {
-            return "CANCELLED_SHUTDOWN";
-        }
-        case CloudMergeOutcome::FAILED_EXCEPTION: {
-            return "FAILED_EXCEPTION";
-        }
-    }
-    return "UNKNOWN_OUTCOME";
-}
 
 // [SE3基线] 统一过滤无效 CloudMap KeyFrame，避免补偿阶段触碰空指针或 bad keyframe。
 bool IsValidCloudMergeKeyFrame(KeyFrame *pKF) {
@@ -1652,9 +1598,11 @@ void CloudMerging::Run(const bool bOnline) {
         if (pending.pMap != nullptr) {
             cloudMapId = pending.pMap->GetId();
         }
-        const char *environmentName = "LAND_AIR";
+        const char *environmentName = "LAND";
         if (IsSeaEnvironment(mRuntimeEnvironment)) {
             environmentName = "SEA";
+        } else if (mRuntimeEnvironment == RuntimeEnvironment::AIR) {
+            environmentName = "AIR";
         }
         std::cerr << "\n\033[1;37m"
                   << "===================== CLOUD MAP MERGE ====================="
@@ -1678,8 +1626,15 @@ void CloudMerging::Run(const bool bOnline) {
         try {
             if (IsSeaEnvironment(mRuntimeEnvironment)) {
                 executionResult = RunSeaCloudMerge(pending);
+            } else if (mRuntimeEnvironment == RuntimeEnvironment::LAND) {
+                executionResult = RunLandCloudMerge(pending);
+            } else if (mRuntimeEnvironment == RuntimeEnvironment::AIR) {
+                executionResult = RunAirCloudMerge(pending);
             } else {
-                executionResult = RunLandAirCloudMerge(pending);
+                executionResult.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
+                executionResult.detail = "unknown cloud merge runtime environment";
+                executionResult.cleanupAction =
+                    CloudMapCleanupAction::DELETE_CLOUD_MAP;
             }
         } catch (const std::exception &exception) {
             executionResult.outcome = CloudMergeOutcome::FAILED_EXCEPTION;
@@ -2289,6 +2244,9 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
                 // Merge !!!
                 bMapMutationMayHaveOccurred = true;
                 CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf);
+                mpAtlas->AddMergedMapId(
+                    mpCurrentEdgeFrontMap,
+                    mpCurrentCloudMap->GetId());
 
                 mpAtlas->RemoveBadMaps();
                 gbaRelaunchGuard.RunAndDismiss();
@@ -2607,11 +2565,16 @@ CloudMergeExecutionResult CloudMerging::RunSeaCloudMerge(
 
                     // Merge !!!
                     CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf);
+                    mpAtlas->AddMergedMapId(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap->GetId());
 
                     if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
                         mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
                     }
-                    mpCurrentEdgeFrontMap->ChangeId(mpCurrentEdgeBackMap->GetId());
+                    mpAtlas->ChangeMapId(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap->GetId());
                     mpCurrentEdgeFrontMap->ResetHaveMerged();
 
                     mpAtlas->SetMapBad(mpCurrentEdgeBackMap);
@@ -2881,7 +2844,16 @@ void CloudMerging::CancelPendingCloudMaps(
     }
 }
 
-CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
+CloudMergeExecutionResult CloudMerging::RunAirCloudMerge(
+    PendingCloudMap &pending) {
+    CloudMergeExecutionResult result;
+    result.outcome = CloudMergeOutcome::MERGE_NOT_IMPLEMENTED_AIR;
+    result.detail = "AIR cloud merge not implemented";
+    result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+    return result;
+}
+
+CloudMergeExecutionResult CloudMerging::RunLandCloudMerge(
     PendingCloudMap &pending) {
     CloudMergeExecutionResult result;
     if (pending.pMap == nullptr) {
@@ -2928,6 +2900,13 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
              << endl;
         result.outcome = CloudMergeOutcome::MERGE_SKIPPED_EDGE_MAP_MISSING;
         result.detail = "referenced edge map is unavailable";
+        result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
+        return result;
+    }
+
+    if (mpCurrentEdgeFrontMap == mpCurrentEdgeBackMap) {
+        result.outcome = CloudMergeOutcome::MERGE_SKIPPED_INVALID_MAP;
+        result.detail = "LAND front/back resolve to same map";
         result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
         return result;
     }
@@ -2983,7 +2962,7 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         return result;
     }
 
-    std::cerr << "[CloudMerge][LAND_AIR][1/4] EdgeFront/CloudMap 锚点匹配完成：pairs="
+    std::cerr << "[CloudMerge][LAND][1/4] EdgeFront/CloudMap 锚点匹配完成：pairs="
               << mpEdgeFrontCloudKeyFrameMatch.size()
               << "，开始第一阶段 Sim3。" << std::endl;
 
@@ -3019,9 +2998,10 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
          << mEdgeFrontCloudKeyFrameRandSelectMatch.size() << " / "
          << mpEdgeFrontCloudKeyFrameMatch.size() << endl;
 
-    std::cerr << "[CloudMerge][LAND_AIR][2/4] 估计 EdgeFront → CloudMap Sim3。"
+    std::cerr << "[CloudMerge][LAND][2/4] 估计 EdgeFront → CloudMap Sim3。"
               << std::endl;
-    const bool bComputeEdgeFront = ComputeSubmapSim3(
+    LandGeometryDiagnostics firstStageDiagnostics;
+    const bool bComputeEdgeFront = ComputeLandSubmapSim3(
         mpCurrentEdgeFrontMap,
         mpCurrentCloudMap,
         mpEdgeFrontCloudKeyFrameMatch,
@@ -3030,11 +3010,21 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         mgSwEdgeFrontCloud,
         mvpEdgeFrontCloudMatchedKeyPoints,
         mpMapDrawer,
-        mbOldUdf,
         mbNewUdf,
-        false);
+        LandGeometryStage::FRONT_CLOUD,
+        &firstStageDiagnostics);
+    std::cerr << "[CloudMerge][LAND][Geometry] environment=LAND"
+              << " stage=FRONT_CLOUD"
+              << " matched_kf=" << firstStageDiagnostics.matchedKeyFrameCount
+              << " selected_kf=" << firstStageDiagnostics.selectedKeyFrameCount
+              << " estimated_scale=" << firstStageDiagnostics.estimatedScale
+              << " visual_inlier_ratio=" << firstStageDiagnostics.visualInlierRatio
+              << " newUdf=" << firstStageDiagnostics.newUdf
+              << " icp_executed=" << firstStageDiagnostics.icpExecuted
+              << " icp_converged=" << firstStageDiagnostics.icpConverged
+              << " accepted=" << firstStageDiagnostics.accepted
+              << std::endl;
     if (!bComputeEdgeFront && !mbMergeAnyway) {
-        mpCurrentEdgeBackMap->ResetHaveMerged();
         result.outcome = CloudMergeOutcome::MERGE_SKIPPED_SIM3_FAILURE;
         result.detail = "edge-front to CloudMap Sim3 failed";
         result.cleanupAction = CloudMapCleanupAction::DELETE_CLOUD_MAP;
@@ -3066,7 +3056,7 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
             mpCurrentEdgeFrontMap);
     });
 
-    std::cerr << "[CloudMerge][LAND_AIR][2/4] 第一阶段 Sim3 完成，开始合并 EdgeFront + CloudMap。"
+    std::cerr << "[CloudMerge][LAND][2/4] 第一阶段 Sim3 完成，开始合并 EdgeFront + CloudMap。"
               << std::endl;
     bMapMutationMayHaveOccurred = true;
     CloudMergeMap(
@@ -3079,6 +3069,9 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         true,
         mbOldUdf,
         mbNewUdf);
+    mpAtlas->AddMergedMapId(
+        mpCurrentEdgeFrontMap,
+        mpCurrentCloudMap->GetId());
     mpAtlas->RemoveBadMaps();
     firstGbaRelaunchGuard.RunAndDismiss();
 
@@ -3127,7 +3120,6 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
     if (mpNewEdgeFrontEdgeBackKeyFrameMatch.empty()) {
         cerr << "\033[1;31m匹配EdgeBack和New Cloud Map的KeyFrames数量过少\033[0m"
              << endl;
-        mpCurrentEdgeBackMap->ResetHaveMerged();
         result.outcome =
             CloudMergeOutcome::PARTIAL_FAILURE_AFTER_CORRECTION;
         result.detail =
@@ -3169,10 +3161,10 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
          << mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch.size() << " / "
          << mpNewEdgeFrontEdgeBackKeyFrameMatch.size() << endl;
 
-    const bool mbedge_merge = mbOldUdf || mbNewUdf;
-    std::cerr << "[CloudMerge][LAND_AIR][3/4] 开始估计合并后地图 → EdgeBack 的 Sim3。"
+    std::cerr << "[CloudMerge][LAND][3/4] 开始估计合并后地图 → EdgeBack 的 Sim3。"
               << std::endl;
-    const bool bComputeEdgeBack = ComputeSubmapSim3(
+    LandGeometryDiagnostics secondStageDiagnostics;
+    const bool bComputeEdgeBack = ComputeLandSubmapSim3(
         mpCurrentEdgeFrontMap,
         mpCurrentEdgeBackMap,
         mpNewEdgeFrontEdgeBackKeyFrameMatch,
@@ -3182,10 +3174,20 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         mvpNewEdgeFrontEdgeBackMatchedKeyPoints,
         mpMapDrawer,
         false,
-        false,
-        mbedge_merge);
+        LandGeometryStage::COMBINED_BACK,
+        &secondStageDiagnostics);
+    std::cerr << "[CloudMerge][LAND][Geometry] environment=LAND"
+              << " stage=COMBINED_BACK"
+              << " matched_kf=" << secondStageDiagnostics.matchedKeyFrameCount
+              << " selected_kf=" << secondStageDiagnostics.selectedKeyFrameCount
+              << " estimated_scale=" << secondStageDiagnostics.estimatedScale
+              << " visual_inlier_ratio=" << secondStageDiagnostics.visualInlierRatio
+              << " newUdf=" << secondStageDiagnostics.newUdf
+              << " icp_executed=" << secondStageDiagnostics.icpExecuted
+              << " icp_converged=" << secondStageDiagnostics.icpConverged
+              << " accepted=" << secondStageDiagnostics.accepted
+              << std::endl;
     if (!bComputeEdgeBack && !mbMergeAnyway) {
-        mpCurrentEdgeBackMap->ResetHaveMerged();
         result.outcome =
             CloudMergeOutcome::PARTIAL_FAILURE_AFTER_CORRECTION;
         result.detail =
@@ -3220,7 +3222,7 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
             mpCurrentEdgeFrontMap);
     });
 
-    std::cerr << "[CloudMerge][LAND_AIR][4/4] 第二阶段 Sim3 完成，开始结构合并到 EdgeBack。"
+    std::cerr << "[CloudMerge][LAND][4/4] 第二阶段 Sim3 完成，开始结构合并到 EdgeBack。"
               << std::endl;
     CloudMergeMap(
         mpCurrentEdgeFrontMap,
@@ -3232,14 +3234,18 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
         true,
         mbOldUdf,
         mbNewUdf);
+    mpAtlas->AddMergedMapId(
+        mpCurrentEdgeFrontMap,
+        mpCurrentEdgeBackMap->GetId());
 
-    if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
-        mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
-    }
-    mpCurrentEdgeFrontMap->ChangeId(mpCurrentEdgeBackMap->GetId());
-    mpCurrentEdgeFrontMap->ResetHaveMerged();
-    mpAtlas->SetMapBad(mpCurrentEdgeBackMap);
-    mpAtlas->RemoveBadMaps();
+    const unsigned long previousEdgeFrontMapId =
+        mpCurrentEdgeFrontMap->GetId();
+    const unsigned long edgeBackMapId = mpCurrentEdgeBackMap->GetId();
+    CommitLandRetainedMapIdentityHandoff(
+        mpCurrentEdgeFrontMap,
+        mpCurrentEdgeBackMap,
+        previousEdgeFrontMapId,
+        edgeBackMapId);
     secondGbaRelaunchGuard.RunAndDismiss();
 
     cerr << "==================================" << endl;
@@ -3278,9 +3284,58 @@ CloudMergeExecutionResult CloudMerging::RunLandAirCloudMerge(
     }
 }
 
+void CloudMerging::ReleaseLandSamplingReservations(
+    const PendingCloudMap &pending) noexcept {
+    if (mRuntimeEnvironment != RuntimeEnvironment::LAND ||
+        mpAtlas == nullptr ||
+        pending.pMap == nullptr) {
+        return;
+    }
+
+    try {
+        Map *pEdgeFrontMap = mpAtlas->GetSpecifyMap(
+            pending.pMap->edgeFrontMapMnId);
+        Map *pEdgeBackMap = mpAtlas->GetSpecifyMap(
+            pending.pMap->edgeBackMapMnId);
+
+        if (pEdgeFrontMap != nullptr) {
+            pEdgeFrontMap->ResetHaveMerged();
+        }
+        if (pEdgeBackMap != nullptr && pEdgeBackMap != pEdgeFrontMap) {
+            pEdgeBackMap->ResetHaveMerged();
+        }
+    } catch (const std::exception &exception) {
+        std::cerr << "[CloudMerging][LAND][WARNING] failed to release "
+                  << "sampling reservations: " << exception.what()
+                  << std::endl;
+    } catch (...) {
+        std::cerr << "[CloudMerging][LAND][WARNING] failed to release "
+                  << "sampling reservations: unknown exception"
+                  << std::endl;
+    }
+}
+
+void CloudMerging::CommitLandRetainedMapIdentityHandoff(
+    Map *pRetainedMap,
+    Map *pMergedMap,
+    const unsigned long previousId,
+    const unsigned long newId) {
+    if (pRetainedMap == nullptr || pMergedMap == nullptr || mpAtlas == nullptr) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(pRetainedMap->mMutexMapUpdate);
+    mpAtlas->CommitMergedMapIdentityHandoff(
+        pRetainedMap,
+        pMergedMap,
+        previousId,
+        newId);
+}
+
 void CloudMerging::ApplyCloudMapCleanup(
     PendingCloudMap &pending,
     const CloudMapCleanupAction cleanupAction) {
+    ReleaseLandSamplingReservations(pending);
     if (cleanupAction == CloudMapCleanupAction::DELETE_CLOUD_MAP &&
         pending.pMap != nullptr) {
         delete pending.pMap;
@@ -3338,6 +3393,291 @@ bool next_iteration = false;
  * @param
  * @return
  */
+bool CloudMerging::ComputeLandVisualSim3FromCenters(
+    const std::vector<Eigen::Vector3d> &map1Centers,
+    const std::vector<Eigen::Vector3d> &map2Centers,
+    g2o::Sim3 &gSw1w2) {
+    if (map1Centers.size() < 3 || map1Centers.size() != map2Centers.size()) {
+        return false;
+    }
+
+    const Eigen::Matrix4d umeyamaResult = Sim3Solver::umeyamaSolve(
+        map2Centers,
+        map1Centers);
+    const Sophus::Sim3d visualSim3(umeyamaResult.cast<double>());
+    gSw1w2 = g2o::Sim3(
+        visualSim3.rotationMatrix(),
+        visualSim3.translation(),
+        visualSim3.scale());
+    return true;
+}
+
+g2o::Sim3 CloudMerging::ComposeLandRigidIcpRefinement(
+    const g2o::Sim3 &visualSim3,
+    const Eigen::Matrix4d &rigidIcpTransform) {
+    const Eigen::Matrix3d rigidRotation =
+        rigidIcpTransform.block<3, 3>(0, 0);
+    const Eigen::Vector3d rigidTranslation =
+        rigidIcpTransform.block<3, 1>(0, 3);
+    const Eigen::Matrix3d visualRotation =
+        visualSim3.rotation().normalized().toRotationMatrix();
+    const Eigen::Vector3d visualTranslation = visualSim3.translation();
+
+    return g2o::Sim3(
+        rigidRotation * visualRotation,
+        rigidRotation * visualTranslation + rigidTranslation,
+        visualSim3.scale());
+}
+
+Eigen::Matrix4d CloudMerging::AccumulateLandRigidIcpTransform(
+    const Eigen::Matrix4d &accumulatedRigidTransform,
+    const Eigen::Matrix4d &currentRigidTransform) {
+    return currentRigidTransform * accumulatedRigidTransform;
+}
+
+bool CloudMerging::IsLandVisualGeometryAccepted(
+    const float visualInlierRatio) {
+    return visualInlierRatio > 0.1F;
+}
+
+bool CloudMerging::ComputeLandSubmapSim3(
+    Map *pMap1, Map *pMap2, const std::map<int, int> &mKfMatch12,
+    const std::map<int, int> &mRandSelectKfMatch12,
+    bool bFixScale,
+    g2o::Sim3 &gSw1w2,
+    std::map<KeyFrame *, std::vector<std::pair<int, int>>> &mvpMatchedKeyPoints12,
+    MapDrawer *pMapDrawer,
+    bool newUdf,
+    LandGeometryStage stage,
+    LandGeometryDiagnostics *diagnostics) {
+    (void)bFixScale;
+    (void)pMapDrawer;
+
+    LandGeometryDiagnostics localDiagnostics;
+    LandGeometryDiagnostics *activeDiagnostics = &localDiagnostics;
+    if (diagnostics != nullptr) {
+        activeDiagnostics = diagnostics;
+    }
+    *activeDiagnostics = LandGeometryDiagnostics();
+    activeDiagnostics->matchedKeyFrameCount = mKfMatch12.size();
+    activeDiagnostics->selectedKeyFrameCount = mRandSelectKfMatch12.size();
+    activeDiagnostics->newUdf = newUdf;
+
+    const char *stageName = "FRONT_CLOUD";
+    if (stage == LandGeometryStage::COMBINED_BACK) {
+        stageName = "COMBINED_BACK";
+    }
+
+    if (pMap1 == nullptr || pMap2 == nullptr) {
+        std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                  << " rejected: null map input" << std::endl;
+        return false;
+    }
+
+    const float keyPointMatchTolerancePixel = 3.0F;
+    const std::vector<KeyFrame *> &map1KeyFrames = pMap1->GetAllKeyFrames();
+    const std::vector<KeyFrame *> &map2KeyFrames = pMap2->GetAllKeyFrames();
+
+    std::map<KeyFrame *, std::vector<MapPoint *>> matchedPointsByKeyFrame;
+
+    for (const auto &match : mKfMatch12) {
+        if (match.first < 0 || match.second < 0 ||
+            static_cast<std::size_t>(match.first) >= map1KeyFrames.size() ||
+            static_cast<std::size_t>(match.second) >= map2KeyFrames.size()) {
+            std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                      << " rejected: keyframe match index out of range" << std::endl;
+            return false;
+        }
+
+        KeyFrame *map1KeyFrame = map1KeyFrames[match.first];
+        KeyFrame *map2KeyFrame = map2KeyFrames[match.second];
+        if (map1KeyFrame == nullptr || map2KeyFrame == nullptr) {
+            std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                      << " rejected: null matched keyframe" << std::endl;
+            return false;
+        }
+
+        const std::vector<MapPoint *> &map1MapPoints =
+            map1KeyFrame->GetMapPointMatches();
+        const std::vector<MapPoint *> &map2MapPoints =
+            map2KeyFrame->GetMapPointMatches();
+        const std::vector<cv::KeyPoint> &map1KeyPoints = map1KeyFrame->mvKeys;
+        const std::vector<cv::KeyPoint> &map2KeyPoints = map2KeyFrame->mvKeys;
+        std::vector<MapPoint *> matchedPoints(map1MapPoints.size(), nullptr);
+        std::vector<std::pair<int, int>> keyPointMatches;
+
+        for (std::size_t map1Index = 0;
+             map1Index < map1KeyPoints.size();
+             ++map1Index) {
+            if (map1Index >= map1MapPoints.size()) {
+                continue;
+            }
+
+            const float map1U = map1KeyPoints[map1Index].pt.x;
+            const float map1V = map1KeyPoints[map1Index].pt.y;
+            const std::vector<std::size_t> candidates =
+                map2KeyFrame->GetFeaturesInArea(
+                    map1U,
+                    map1V,
+                    keyPointMatchTolerancePixel);
+            float bestDistance = keyPointMatchTolerancePixel;
+            int bestIndex = -1;
+
+            for (const std::size_t map2Index : candidates) {
+                if (map2Index >= map2KeyPoints.size() ||
+                    map2Index >= map2MapPoints.size()) {
+                    continue;
+                }
+
+                const float map2U = map2KeyPoints[map2Index].pt.x;
+                const float map2V = map2KeyPoints[map2Index].pt.y;
+                const float distance = std::sqrt(
+                    std::pow(map1U - map2U, 2.0F) +
+                    std::pow(map1V - map2V, 2.0F));
+                if (distance < bestDistance &&
+                    map1MapPoints[map1Index] != nullptr &&
+                    map2MapPoints[map2Index] != nullptr) {
+                    bestDistance = distance;
+                    bestIndex = static_cast<int>(map2Index);
+                }
+            }
+
+            if (bestIndex < 0) {
+                continue;
+            }
+
+            matchedPoints[map1Index] = map2MapPoints[bestIndex];
+            keyPointMatches.emplace_back(
+                static_cast<int>(map1Index),
+                bestIndex);
+        }
+
+        matchedPointsByKeyFrame[map1KeyFrame] = matchedPoints;
+        mvpMatchedKeyPoints12[map1KeyFrame] = keyPointMatches;
+    }
+
+    std::vector<KeyFrame *> matchedMap1KeyFrames;
+    std::vector<KeyFrame *> matchedMap2KeyFrames;
+    std::vector<std::vector<MapPoint *>> matchedPoints;
+    matchedMap1KeyFrames.reserve(mKfMatch12.size());
+    matchedMap2KeyFrames.reserve(mKfMatch12.size());
+    matchedPoints.reserve(mKfMatch12.size());
+
+    for (const auto &match : mKfMatch12) {
+        KeyFrame *map1KeyFrame = map1KeyFrames[match.first];
+        KeyFrame *map2KeyFrame = map2KeyFrames[match.second];
+        matchedMap1KeyFrames.push_back(map1KeyFrame);
+        matchedMap2KeyFrames.push_back(map2KeyFrame);
+        matchedPoints.push_back(matchedPointsByKeyFrame[map1KeyFrame]);
+    }
+
+    std::vector<Eigen::Vector3d> map1Centers;
+    std::vector<Eigen::Vector3d> map2Centers;
+    map1Centers.reserve(mRandSelectKfMatch12.size());
+    map2Centers.reserve(mRandSelectKfMatch12.size());
+    for (const auto &match : mRandSelectKfMatch12) {
+        if (match.first < 0 || match.second < 0 ||
+            static_cast<std::size_t>(match.first) >= map1KeyFrames.size() ||
+            static_cast<std::size_t>(match.second) >= map2KeyFrames.size()) {
+            std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                      << " rejected: selected keyframe index out of range" << std::endl;
+            return false;
+        }
+
+        KeyFrame *map1KeyFrame = map1KeyFrames[match.first];
+        KeyFrame *map2KeyFrame = map2KeyFrames[match.second];
+        if (map1KeyFrame == nullptr || map2KeyFrame == nullptr) {
+            std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                      << " rejected: null selected keyframe" << std::endl;
+            return false;
+        }
+
+        map1Centers.push_back(
+            map1KeyFrame->GetPoseInverse().translation().cast<double>());
+        map2Centers.push_back(
+            map2KeyFrame->GetPoseInverse().translation().cast<double>());
+    }
+
+    if (!ComputeLandVisualSim3FromCenters(map1Centers, map2Centers, gSw1w2)) {
+        std::cerr << "[CloudMerge][LAND][Geometry] stage=" << stageName
+                  << " rejected: fewer than three visual anchors" << std::endl;
+        return false;
+    }
+
+    activeDiagnostics->estimatedScale = gSw1w2.scale();
+    Eigen::Matrix<double, 7, 7> hessian7x7;
+    activeDiagnostics->visualInlierRatio = Optimizer::OptimizeCloudSim3(
+        matchedMap1KeyFrames,
+        matchedMap2KeyFrames,
+        matchedPoints,
+        gSw1w2,
+        10,
+        true,
+        hessian7x7,
+        true);
+    const g2o::Sim3 visualSim3 = gSw1w2;
+
+    bool runIcp = false;
+    if (stage == LandGeometryStage::FRONT_CLOUD && newUdf) {
+        runIcp = true;
+    }
+
+    if (runIcp) {
+        activeDiagnostics->icpExecuted = true;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr edgePoints(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr originalCloudPoints(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr visualAlignedCloudPoints(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr currentIcpSource(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr currentIcpOutput(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        get_xyz(pMap2->GetAllMapPoints(), *originalCloudPoints);
+        get_xyz(pMap1->GetAllMapPoints(), *edgePoints);
+
+        const Eigen::Quaterniond rotation = visualSim3.rotation();
+        Eigen::Matrix4d visualTransform = Eigen::Matrix4d::Identity();
+        visualTransform.block<3, 3>(0, 0) =
+            rotation.normalized().toRotationMatrix() * visualSim3.scale();
+        visualTransform.block<3, 1>(0, 3) = visualSim3.translation();
+        pcl::transformPointCloud(
+            *originalCloudPoints,
+            *visualAlignedCloudPoints,
+            visualTransform);
+        *currentIcpSource = *visualAlignedCloudPoints;
+
+        pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+        int iterations = 1;
+        Eigen::Matrix4d accumulatedRigidTransform = Eigen::Matrix4d::Identity();
+        while (iterations < 20) {
+            assert(currentIcpSource.get() != currentIcpOutput.get());
+            icp.setInputSource(currentIcpSource);
+            icp.setInputTarget(edgePoints);
+            icp.align(*currentIcpOutput);
+            const Eigen::Matrix4d currentRigidTransform =
+                icp.getFinalTransformation().cast<double>();
+            accumulatedRigidTransform = AccumulateLandRigidIcpTransform(
+                accumulatedRigidTransform,
+                currentRigidTransform);
+            activeDiagnostics->icpConverged = icp.hasConverged();
+            currentIcpSource.swap(currentIcpOutput);
+            currentIcpOutput->clear();
+            ++iterations;
+        }
+
+        gSw1w2 = ComposeLandRigidIcpRefinement(
+            visualSim3,
+            accumulatedRigidTransform);
+    }
+
+    activeDiagnostics->estimatedScale = gSw1w2.scale();
+    activeDiagnostics->accepted = IsLandVisualGeometryAccepted(
+        activeDiagnostics->visualInlierRatio);
+    return activeDiagnostics->accepted;
+}
+
 bool CloudMerging::ComputeSubmapSim3(
     Map *pMap1, Map *pMap2, const std::map<int, int> &mKfMatch12,
     const std::map<int, int> &mRandSelectKfMatch12,
@@ -4292,7 +4632,6 @@ void CloudMerging::CloudMergeMap(
         pMainMap->IncreaseChangeIndex();
 
         std::cerr << "[Merge]: merging maps finished" << std::endl;
-        pMainMap->mvMergedMapIds.push_back(pMergedMap->GetId());
     }
 
     auto logParentChainBreak = [](const std::string &reason,

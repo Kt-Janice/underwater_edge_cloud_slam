@@ -1475,11 +1475,11 @@ void LoopClosing::MergeLocal() // 无IMU情况下的子图合并
         mpAtlas->SetMapBad(pCurrentMap);
         pMergeMap->IncreaseChangeIndex();
         //TODO for debug
-        pMergeMap->ChangeId(pCurrentMap->GetId());
+        mpAtlas->ChangeMapId(pMergeMap, pCurrentMap->GetId());
 
         //std::cout << "[Merge]: merging maps finished" << std::endl;
         // @note 添加Merged Map Id到Main Map中
-        pMergeMap->mvMergedMapIds.push_back(pCurrentMap->GetId());
+        mpAtlas->AddMergedMapId(pMergeMap, pCurrentMap->GetId());
     }
 
     // ***************** 第六步，前面完成Welding Window的迁移后，构建新的Essential Graph *****************

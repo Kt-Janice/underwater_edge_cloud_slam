@@ -31,7 +31,6 @@
 #include "opencv2/core/types.hpp"
 #include "opencv2/imgcodecs.hpp"
 #include "sophus/sim3.hpp"
-#include "SVIn2ORBWrapper.h" // [Sim3合并实验] 查询 OKVIS / SVIn2 前端位姿缓存
 
 #include <Eigen/src/Core/ArithmeticSequence.h>
 #include <Eigen/src/Core/Matrix.h>
@@ -43,10 +42,6 @@
 #include <thread>
 #include <sstream>
 #include <utility>
-#include <limits>
-#include <cmath>
-#include <map>
-#include <vector>
 
 //cap-udf
 #include <pcl/io/ply_io.h>
@@ -55,97 +50,8 @@
 #include <pcl/visualization/pcl_visualizer.h>
 #include <pcl/console/time.h> 
 
-// [Sim3合并实验] 全局 wrapper 指针定义在 SVIn2ORBWrapper.cpp 中。
-// CloudMerging 通过该指针按时间戳查询 OKVIS / SVIn2 前端位姿。
-extern SVIn2ORBWrapper* pSVIn2ORBWrapper;
 
 namespace ORB_SLAM3 {
-
-namespace {
-
-// [SE3基线] 统一过滤无效 CloudMap KeyFrame，避免补偿阶段触碰空指针或 bad keyframe。
-bool IsValidCloudMergeKeyFrame(KeyFrame *pKF) {
-    if (pKF == nullptr) {
-        return false;
-    }
-
-    if (pKF->isBad()) {
-        return false;
-    }
-
-    if (!std::isfinite(pKF->mTimeStamp)) {
-        return false;
-    }
-
-    return true;
-}
-
-// [SE3基线] 旧 SE(3) 双锚点基线仅保留时间线性残差分摊。
-double ComputeTimeLinearCorrectionWeight(const double timestamp, const double tStart, const double tEnd) {
-    if (tEnd <= tStart) {
-        return 0.0;
-    }
-
-    if (timestamp <= tStart) {
-        return 0.0;
-    }
-
-    if (timestamp >= tEnd) {
-        return 1.0;
-    }
-
-    double weight = (timestamp - tStart) / (tEnd - tStart);
-    if (!std::isfinite(weight)) {
-        return 0.0;
-    }
-
-    if (weight < 0.0) {
-        return 0.0;
-    }
-
-    if (weight > 1.0) {
-        return 1.0;
-    }
-
-    return weight;
-}
-
-// [SE3基线] 构造纯 timestamp 排序的 TIME_LINEAR 权重表。
-bool BuildTimeLinearCorrectionWeights(
-    const std::vector<KeyFrame *> &vCloudKeyFrames,
-    const double tStart,
-    const double tEnd,
-    std::map<KeyFrame *, double> &keyFrameCorrectionWeight) {
-    keyFrameCorrectionWeight.clear();
-
-    std::vector<KeyFrame *> vSortedCloudKeyFrames;
-    vSortedCloudKeyFrames.reserve(vCloudKeyFrames.size());
-    for (size_t i = 0; i < vCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vCloudKeyFrames[i];
-        if (!IsValidCloudMergeKeyFrame(pKF)) {
-            continue;
-        }
-
-        vSortedCloudKeyFrames.push_back(pKF);
-    }
-
-    if (vSortedCloudKeyFrames.empty()) {
-        return false;
-    }
-
-    std::sort(vSortedCloudKeyFrames.begin(), vSortedCloudKeyFrames.end(), [](KeyFrame *pLeft, KeyFrame *pRight) {
-        return pLeft->mTimeStamp < pRight->mTimeStamp;
-    });
-
-    for (size_t i = 0; i < vSortedCloudKeyFrames.size(); i++) {
-        KeyFrame *pKF = vSortedCloudKeyFrames[i];
-        keyFrameCorrectionWeight[pKF] = ComputeTimeLinearCorrectionWeight(pKF->mTimeStamp, tStart, tEnd);
-    }
-
-    return true;
-}
-
-} // namespace
 
 CloudMerging::CloudMerging(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC, const bool bWork, const bool bMergeAnyway, MapDrawer *pMapDrawer, FrameDrawer *pFrameDrawer, const bool bOldUdf, const bool bNewUdf) :
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas),
@@ -153,13 +59,33 @@ CloudMerging::CloudMerging(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *
     mbStopGBA(false), mpThreadGBA(nullptr), mbFixScale(bFixScale), mnFullBAIdx(0), mnMergeNumCoincidences(0),
     mbMergeDetected(false), mnMergeNumNotFound(0), mbActiveCM(bActiveLC), mbMergeAnyway(bMergeAnyway), mbWork(bWork),
     mpMapDrawer(pMapDrawer), mpFrameDrawer(pFrameDrawer), mbOldUdf(bOldUdf), mbNewUdf(bNewUdf) {
-    
     mnCovisibilityConsistencyTh = 3;
     mpLastCurrentKF = static_cast<KeyFrame *>(NULL);
 
     mstrFolderSubTraj = "SubTrajectories/";
     mnNumCorrection = 0;
     mnCorrectionGBA = 0;
+
+    // TODO 临时用于测试
+    // const std::string testCloudMapTimeStampsPath = "/home/red0orange/Data/TUM/rgbd_dataset_freiburg3_structure_texture_near/rgb_cloudedge_dvoid.txt";
+    // ifstream infile;
+    // infile.open(testCloudMapTimeStampsPath, ios::in);
+    // if (!infile.is_open()) {
+    //     cerr << "读取文件失败" << endl;
+    //     exit(100);
+    // }
+    // vector<string> vLines;
+    // string tmpLine;
+    // while (getline(infile, tmpLine))
+    //     vLines.push_back(tmpLine);
+    // infile.close();
+    // for (int i = 0; i < vLines.size(); ++i) {
+    //     string line = vLines[i];
+    //     istringstream str(line);
+    //     string timeStamp;
+    //     str >> timeStamp;
+    //     mvpTestCloudMapTimeStamps.push_back(stod(timeStamp));
+    // }
 }
 
 void CloudMerging::SetTracker(Tracking *pTracker) {
@@ -174,7 +100,7 @@ void CloudMerging::SetLoopClosing(LoopClosing *pLoopClosing) {
     mpLoopClosing = pLoopClosing;
 }
 
-void CloudMerging::Run(bool bOnline) { 
+void CloudMerging::Run(bool bOnline) { //bOnline = true
     mbFinished = false;
 
     // 限制最大的match KF num，防止Cloud SLAM运行时本地进行了Loop Closure的清空
@@ -182,7 +108,7 @@ void CloudMerging::Run(bool bOnline) {
 
     while (1) {
         // ***************** 第一步，检查是否有CloudMap *****************
-        if (CheckNewCloudMap(bOnline) && mbWork) { 
+        if (CheckNewCloudMap(bOnline) && mbWork) { // CheckNewCloudMap(bOnline) && mbWork //false
             static int nCloudMerge = 0;
             nCloudMerge++;
 
@@ -191,26 +117,30 @@ void CloudMerging::Run(bool bOnline) {
             {
                 unique_lock<mutex> lock(mMutexCloudQueue);
                 if (bOnline) {
-                    mpCurrentCloudMap = mlpCloudMapQueue.front(); 
+                    mpCurrentCloudMap = mlpCloudMapQueue.front(); //mlpCloudMapQueue为云端传回的地图
                     mlpCloudMapQueue.pop_front();
-                    mpCurrentEdgeFrontMap = mpAtlas->GetSpecifyMap(mpCurrentCloudMap->edgeFrontMapMnId); 
-                    
-                    if (false) {
+                    mpCurrentEdgeFrontMap = mpAtlas->GetSpecifyMap(mpCurrentCloudMap->edgeFrontMapMnId); //边端前段地图
+                    //cap-udf
+                    if(false) {
                         vector<MapPoint *> EdgeFrontMapPoint = mpCurrentEdgeFrontMap->GetAllMapPoints();
-                        std::string file_name = "/home/birl/Udf-Edge/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
+                        std::string file_name = "/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test.xyz";
                         std::ofstream f(file_name);
-                        for (int n = 0; n < EdgeFrontMapPoint.size(); n++) {
+                        for (int n = 0; n < EdgeFrontMapPoint.size(); n++){
                             Eigen::Vector3f mpWorldPos = EdgeFrontMapPoint[n]->GetWorldPos();
                             f << mpWorldPos[0] << " " << mpWorldPos[1] << " " << mpWorldPos[2] << std::endl;
                         }
                         f.close();
                     }
-                    
-                    mpCurrentEdgeBackMap = mpAtlas->GetSpecifyMap(mpCurrentCloudMap->edgeBackMapMnId); 
+                    //cap-udf
+                    mpCurrentEdgeBackMap = mpAtlas->GetSpecifyMap(mpCurrentCloudMap->edgeBackMapMnId); //边端后端地图
+                    // @note 当前测试固定是0、1 Map
+                    // mpCurrentEdgeFrontMap = mpAtlas->GetSpecifyMap(0);
+                    // mpCurrentEdgeBackMap = mpAtlas->GetSpecifyMap(1);
                 } else {
+                    // 取出地图
                     mpCurrentCloudMap = mlpCloudMapQueue.front();
                     mlpCloudMapQueue.pop_front();
-                    
+                    // TODO Debug For Offline
                     mpCurrentEdgeFrontMap = mlpCloudMapQueue.front();
                     mlpCloudMapQueue.pop_front();
                     mpCurrentEdgeBackMap = mlpCloudMapQueue.front();
@@ -223,285 +153,110 @@ void CloudMerging::Run(bool bOnline) {
             }
 
             if (!mpCurrentEdgeFrontMap || !mpCurrentEdgeBackMap) {
-                cerr << "\033[1;33m[Warning] can't find the refer submap! Maps likely culled due to edge-cloud delay. Aborting this merge.\033[0m" << endl;
-                
-                if (mpCurrentCloudMap) {
-                    delete mpCurrentCloudMap;
-                    mpCurrentCloudMap = nullptr;
-                }
-                mpCurrentEdgeFrontMap = nullptr;
-                mpCurrentEdgeBackMap = nullptr;
-                mbRunning = false;
-                
-                mpEdgeFrontCloudKeyFrameMatch.clear();
-                mvpEdgeFrontCloudMatchedKeyPoints.clear();
-                mgSwEdgeFrontCloud = g2o::Sim3();
-                mpNewEdgeFrontEdgeBackKeyFrameMatch.clear();
-                mvpNewEdgeFrontEdgeBackMatchedKeyPoints.clear();
-                mgSwNewCloudEdgeBack = g2o::Sim3();
-                
-                continue; 
+                cerr << "can't find the refer submap !" << endl;
+                exit(1000);
             }
 
-            // 【核心修复 1：弹性最近邻锚点匹配】
-            double matchToleranceTime = 0.05; 
+            // SaveKeyFrameTrajectoryTUM(mpCurrentCloudMap, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/before_cloud.txt");
+            // SaveKeyFrameTrajectoryTUM(mpCurrentEdgeFrontMap, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/before_edge_front.txt");
+            // SaveKeyFrameTrajectoryTUM(mpCurrentEdgeBackMap, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/before_edge_back.txt");
+
+            // 这里取出Map的KeyFrames进行匹配，可能会和LoopClosing线程Loop Closing或者Merge时的Map Update冲突
+            // 使用time stamp匹配keyframe
+            double matchToleranceTime = 0.00005;
             const vector<KeyFrame *> &edgeFrontMapKeyFrames = mpCurrentEdgeFrontMap->GetAllKeyFrames();
             const vector<KeyFrame *> &cloudMapKeyFrames = mpCurrentCloudMap->GetAllKeyFrames();
-            vector<bool> edgeFrontHaveMatchFlag(cloudMapKeyFrames.size(), false); 
+            vector<bool> edgeFrontHaveMatchFlag(cloudMapKeyFrames.size(), false); // 避免重复匹配
 
-            for (unsigned long edgeFrontKF_i = 0; edgeFrontKF_i < edgeFrontMapKeyFrames.size(); edgeFrontKF_i++) { 
-                double minDelta = 1e9;
-                int bestCloudIdx = -1;
-
+            // @note keyframe matched by timestamp
+            // output: mpEdgeFrontCloudKeyFrameMatch
+            for (unsigned long edgeFrontKF_i = 0; edgeFrontKF_i < edgeFrontMapKeyFrames.size(); edgeFrontKF_i++) { //匹配时间戳
                 for (unsigned long cloudKF_i = 0; cloudKF_i < cloudMapKeyFrames.size(); cloudKF_i++) {
-                    if (edgeFrontHaveMatchFlag[cloudKF_i]) { 
-                        continue; 
-                    }
-                    
+                    if (edgeFrontHaveMatchFlag[cloudKF_i]) { continue; }
                     double deltaTime = abs(edgeFrontMapKeyFrames[edgeFrontKF_i]->mTimeStamp - cloudMapKeyFrames[cloudKF_i]->mTimeStamp);
-                    
-                    if (deltaTime < matchToleranceTime && deltaTime < minDelta) {
-                        minDelta = deltaTime;
-                        bestCloudIdx = cloudKF_i;
+                    if (deltaTime < matchToleranceTime) {
+                        mpEdgeFrontCloudKeyFrameMatch[edgeFrontKF_i] = cloudKF_i;
+                        edgeFrontHaveMatchFlag[cloudKF_i] = true;
+                        break;
                     }
                 }
-                
-                if (bestCloudIdx != -1) {
-                    mpEdgeFrontCloudKeyFrameMatch[edgeFrontKF_i] = bestCloudIdx;
-                    edgeFrontHaveMatchFlag[bestCloudIdx] = true;
-                }
             }
-
+            cerr << "EdgeFront KeyFrames:" << edgeFrontMapKeyFrames.size() <<endl;
+            cerr << "Cloud Map KeyFrames:" << cloudMapKeyFrames.size() <<endl;
+            // 增强版：包含帧索引和匹配信息
+		std::ofstream fout_detailed("/home/birlslam/Edge-SLAM/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/timestamp_analysis.txt");
+		if (fout_detailed.is_open()) {
+		    fout_detailed << "帧类型,帧索引,时间戳,匹配状态\n";
+		    
+		    // 输出edgeFront帧信息
+		    for (unsigned long i = 0; i < edgeFrontMapKeyFrames.size(); i++) {
+			std::string match_status = (mpEdgeFrontCloudKeyFrameMatch.find(i) != mpEdgeFrontCloudKeyFrameMatch.end()) 
+				                ? "已匹配" : "未匹配";
+			fout_detailed << "EdgeFront," << i << "," 
+				     << std::fixed << std::setprecision(6) 
+				     << edgeFrontMapKeyFrames[i]->mTimeStamp << ","
+				     << match_status << "\n";
+		    }
+		    
+		    // 输出cloudMap帧信息
+		    for (unsigned long i = 0; i < cloudMapKeyFrames.size(); i++) {
+			fout_detailed << "CloudMap," << i << "," 
+				     << std::fixed << std::setprecision(6) 
+				     << cloudMapKeyFrames[i]->mTimeStamp << ",-\n";
+		    }
+		    
+		    fout_detailed.close();
+		}
             if (mpEdgeFrontCloudKeyFrameMatch.size() < 1) {
-                cerr << "\033[1;31m匹配EdgeFront和Cloud Map的KeyFrames数量过少\033[0m" << endl;
-                
-                if (mpCurrentCloudMap) {
-                    delete mpCurrentCloudMap;
-                    mpCurrentCloudMap = nullptr;
-                }
-                mpCurrentEdgeFrontMap = nullptr;
-                mpCurrentEdgeBackMap = nullptr;
-                mbRunning = false;
-                continue; 
+                cerr << "匹配EdgeFront和Cloud Map的KeyFrames数量过少" << endl;
+                return;
             }
-
-            if (mbOldUdf || mbNewUdf) {
-                if (mpEdgeFrontCloudKeyFrameMatch.size() > 0) {
-                    
-                    // =================================================================================
-                    // 【阶段 1：确立前端定子，计算宏观搬运矩阵 S_head】
-                    // 物理意义：CloudMap 的起点坐标是云端任意初始化的，必须计算一个基础变换矩阵，
-                    // 将其整个坐标系“吸附”到 EdgeFront 的尾部（第一层红圈对齐）。
-                    // =================================================================================
-                    KeyFrame* pKF_CloudStart = nullptr;
-                    KeyFrame* pKF_EdgeFrontEnd = nullptr;
-                    double minDeltaFront = 1e9;
-
-                    for (auto iter : mpEdgeFrontCloudKeyFrameMatch) {
-                        KeyFrame* kfFront = edgeFrontMapKeyFrames[iter.first];
-                        KeyFrame* kfCloud = cloudMapKeyFrames[iter.second];
-                        double dt = std::abs(kfFront->mTimeStamp - kfCloud->mTimeStamp);
-                        if (dt < minDeltaFront) {
-                            minDeltaFront = dt;
-                            pKF_EdgeFrontEnd = kfFront;
-                            pKF_CloudStart = kfCloud;
-                        }
-                    }
-
-                    if (pKF_EdgeFrontEnd != nullptr) {
-                        if (pKF_CloudStart != nullptr) {
-                            double t_start = pKF_CloudStart->mTimeStamp;
-
-                            Sophus::SE3f T_ef_Twc = pKF_EdgeFrontEnd->GetPoseInverse();
-                            Sophus::SE3f T_cloud_head_Twc = pKF_CloudStart->GetPoseInverse();
-
-                            Sophus::Sim3d Sim3_ef(T_ef_Twc.unit_quaternion().cast<double>(), T_ef_Twc.translation().cast<double>());
-                            Sim3_ef.setScale(1.0);
-                            Sophus::Sim3d Sim3_cloud_head(T_cloud_head_Twc.unit_quaternion().cast<double>(), T_cloud_head_Twc.translation().cast<double>());
-                            Sim3_cloud_head.setScale(1.0);
-
-                            // S_head = 目标坐标 * 当前坐标^(-1)
-                            Sophus::Sim3d S_head = Sim3_ef * Sim3_cloud_head.inverse();
-
-                            // =================================================================================
-                            // 【阶段 2：搜索后端定子，计算绝对位姿残差 Delta_T】
-                            // =================================================================================
-                            const vector<KeyFrame *> &edgeBackMapKeyFrames = mpCurrentEdgeBackMap->GetAllKeyFrames();
-                            int bestCloudTailIdx = -1;
-                            int bestEdgeBackHeadIdx = -1;
-                            double minDeltaBack = 1e9;
-                            double matchToleranceTimeBack = 0.05; 
-
-                            for (unsigned long cloud_i = 0; cloud_i < cloudMapKeyFrames.size(); cloud_i++) {
-                                for (unsigned long back_i = 0; back_i < edgeBackMapKeyFrames.size(); back_i++) {
-                                    double deltaT = std::abs(cloudMapKeyFrames[cloud_i]->mTimeStamp - edgeBackMapKeyFrames[back_i]->mTimeStamp);
-                                    if (deltaT < matchToleranceTimeBack) {
-                                        if (deltaT < minDeltaBack) {
-                                            minDeltaBack = deltaT;
-                                            bestCloudTailIdx = cloud_i;
-                                            bestEdgeBackHeadIdx = back_i;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (bestCloudTailIdx != -1) {
-                                if (bestEdgeBackHeadIdx != -1) {
-                                    KeyFrame* pKF_CloudTail = cloudMapKeyFrames[bestCloudTailIdx];
-                                    KeyFrame* pKF_EdgeBackHead = edgeBackMapKeyFrames[bestEdgeBackHeadIdx];
-                                    double t_end = pKF_CloudTail->mTimeStamp;
-
-                                    if (t_end > t_start) {
-                                        Sophus::SE3f T_eb_Twc = pKF_EdgeBackHead->GetPoseInverse();
-                                        Sophus::SE3f T_cloud_tail_Twc = pKF_CloudTail->GetPoseInverse();
-
-                                        Sophus::Sim3d Sim3_eb(T_eb_Twc.unit_quaternion().cast<double>(), T_eb_Twc.translation().cast<double>());
-                                        Sim3_eb.setScale(1.0);
-                                        Sophus::Sim3d Sim3_cloud_tail(T_cloud_tail_Twc.unit_quaternion().cast<double>(), T_cloud_tail_Twc.translation().cast<double>());
-                                        Sim3_cloud_tail.setScale(1.0);
-
-                                        // 【核心修正】：计算残差前，必须先让尾部套用 S_head 基准搬运矩阵！
-                                        // 理论位置 = 基准搬运 * 原始坐标
-                                        Sophus::Sim3d Sim3_cloud_tail_rigid = S_head * Sim3_cloud_tail;
-
-                                        // 纯残差 = 真值目标(EdgeBack) * 理论位置^(-1)
-                                        Sophus::Sim3d delta_T = Sim3_eb * Sim3_cloud_tail_rigid.inverse();
-                                        Eigen::Matrix<double, 7, 1> xi = delta_T.log();
-
-                                        // [SE3基线] 旧双锚点路径仅使用 TIME_LINEAR 残差分摊权重。
-                                        std::map<KeyFrame *, double> cloudKeyFrameCorrectionWeight;
-                                        const bool bBuildCorrectionWeight = BuildTimeLinearCorrectionWeights(
-                                            cloudMapKeyFrames,
-                                            t_start,
-                                            t_end,
-                                            cloudKeyFrameCorrectionWeight);
-
-                                        cerr << "\033[1;32m[CloudMerging] Legacy SE3 two-anchor correction uses TIME-LINEAR weights.\033[0m" << endl;
-
-                                        if (!bBuildCorrectionWeight) {
-                                            cerr << "\033[1;33m[CloudMerging] UDF correction weight table is empty; per-frame fallback remains time-linear.\033[0m" << endl;
-                                        }
-
-                                        // [SE3基线] 查询单个 KeyFrame 的 TIME_LINEAR 权重；缺失时按 timestamp 计算兜底。
-                                        auto getCloudCorrectionWeight = [&](KeyFrame *pKF) -> double {
-                                            if (pKF == nullptr) {
-                                                return 0.0;
-                                            }
-
-                                            auto weightIter = cloudKeyFrameCorrectionWeight.find(pKF);
-                                            if (weightIter != cloudKeyFrameCorrectionWeight.end()) {
-                                                return weightIter->second;
-                                            }
-
-                                            return ComputeTimeLinearCorrectionWeight(pKF->mTimeStamp, t_start, t_end);
-                                        };
-
-                                        // =================================================================================
-                                        // 【阶段 3：劫持 CloudMap 关键帧，执行 双锚点复合扭曲】
-                                        // =================================================================================
-                                        for (size_t i = 0; i < cloudMapKeyFrames.size(); i++) {
-                                            KeyFrame* pKFi = cloudMapKeyFrames[i];
-                                            if (IsValidCloudMergeKeyFrame(pKFi)) {
-                                                // [SE3基线] CloudMap KeyFrame 使用 TIME_LINEAR 补偿权重。
-                                                const double w_i = getCloudCorrectionWeight(pKFi);
-
-                                                Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
-                                                Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
-
-                                                Sophus::SE3f T_cloud_i_Twc = pKFi->GetPoseInverse();
-                                                Sophus::Sim3d Sim3_cloud_i(T_cloud_i_Twc.unit_quaternion().cast<double>(), T_cloud_i_Twc.translation().cast<double>());
-                                                Sim3_cloud_i.setScale(1.0);
-
-                                                // 【终极方程】：纠正后坐标 = 伸缩扭曲(T_scale_i) * 基准搬运(S_head) * 原始坐标(Sim3_cloud_i)
-                                                Sophus::Sim3d Sim3_corrected = T_scale_i * S_head * Sim3_cloud_i;
-
-                                                Sophus::SE3f T_corrected_Twc(Sim3_corrected.rotationMatrix().cast<float>(), Sim3_corrected.translation().cast<float>());
-                                                pKFi->SetPose(T_corrected_Twc.inverse());
-                                            }
-                                        }
-
-                                        // =================================================================================
-                                        // 【阶段 4：劫持 UDF 点云，套用完全相同的双锚点方程】
-                                        // =================================================================================
-                                        const vector<MapPoint*> &cloudMPs = mpCurrentCloudMap->GetAllMapPoints();
-                                        for (size_t j = 0; j < cloudMPs.size(); j++) {
-                                            MapPoint* pMP = cloudMPs[j];
-                                            if (pMP) {
-                                                if (!pMP->isBad()) {
-                                                    KeyFrame* pRefKF = pMP->GetReferenceKeyFrame();
-                                                    if (IsValidCloudMergeKeyFrame(pRefKF)) {
-                                                        // [SE3基线] MapPoint / UDF 点沿用参考 KeyFrame 的 TIME_LINEAR 补偿权重。
-                                                        const double w_i = getCloudCorrectionWeight(pRefKF);
-
-                                                        Eigen::Matrix<double, 7, 1> xi_scaled = xi * w_i;
-                                                        Sophus::Sim3d T_scale_i = Sophus::Sim3d::exp(xi_scaled);
-
-                                                        Eigen::Vector3d P3Dw = pMP->GetWorldPos().cast<double>();
-                                                        
-                                                        // 同样必须先进行 S_head 搬运，再进行拉伸扭曲
-                                                        Eigen::Vector3d P3D_corrected = T_scale_i * S_head * P3Dw;
-                                                        
-                                                        pMP->SetWorldPos(P3D_corrected.cast<float>());
-                                                        pMP->UpdateNormalAndDepth();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        cerr << "\033[1;32m[CloudMerging] Sim3 Lie-Algebra Manifold Smoothing (With Base Alignment) Successfully Applied!\033[0m" << endl;
-                                    } else {
-                                        cerr << "\033[1;33m[CloudMerging] Warning: Time inversion detected, bypass smoothing.\033[0m" << endl;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // ***************** 补偿完毕，向下传递给原有串行合并流程 *****************
-
 
             // ***************** 第三步，对齐Cloud Map和Ground Map，计算Sim3 *****************
             std::vector<int> vEdgeFrontMatchIndexes;
-            for (auto &iter : mpEdgeFrontCloudKeyFrameMatch) {
-                vEdgeFrontMatchIndexes.push_back(iter.first);
-            }
-            sort(vEdgeFrontMatchIndexes.begin(), vEdgeFrontMatchIndexes.end(), [&](int x, int y) { 
-                return edgeFrontMapKeyFrames[x]->mTimeStamp < edgeFrontMapKeyFrames[y]->mTimeStamp; 
-            });
-            
+            for (auto &iter : mpEdgeFrontCloudKeyFrameMatch) vEdgeFrontMatchIndexes.push_back(iter.first);
+            sort(vEdgeFrontMatchIndexes.begin(), vEdgeFrontMatchIndexes.end(), [&](int x, int y) { return edgeFrontMapKeyFrames[x]->mTimeStamp < edgeFrontMapKeyFrames[y]->mTimeStamp; });//按时间戳排列
+            // @note 暂时关闭这个处理
+            // std::vector<int> vEdgeFrontMatchPartIndexes(vEdgeFrontMatchIndexes.begin(), vEdgeFrontMatchIndexes.begin() + int(mpEdgeFrontCloudKeyFrameMatch.size() * (8. / 10.)));
             std::vector<int> vEdgeFrontMatchPartIndexes(vEdgeFrontMatchIndexes.begin(), vEdgeFrontMatchIndexes.begin() + min(int(mpEdgeFrontCloudKeyFrameMatch.size()), nLimitMaxMatchKFNum));
             std::map<int, int> mEdgeFrontCloudKeyFrameRandSelectMatch;
-            for (auto &iter : vEdgeFrontMatchPartIndexes) {
-                mEdgeFrontCloudKeyFrameRandSelectMatch[iter] = mpEdgeFrontCloudKeyFrameMatch[iter];
-            }
+            for (auto &iter : vEdgeFrontMatchPartIndexes) mEdgeFrontCloudKeyFrameRandSelectMatch[iter] = mpEdgeFrontCloudKeyFrameMatch[iter];
 
-            // cerr << "First Merge EdgeFront Map KF num: " << mpCurrentEdgeFrontMap->GetAllKeyFrames().size() << endl;
-            // cerr << "First Merge Cloud Map KF num: " << mpCurrentCloudMap->GetAllKeyFrames().size() << endl;
-            // cerr << "First Merge Rand Select KF ratio: " << mEdgeFrontCloudKeyFrameRandSelectMatch.size() << " / " << mpEdgeFrontCloudKeyFrameMatch.size() << endl;
-            
-            // bool bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
-            bool bComputeEdgeFront = false;
+            // std::vector<KeyFrame *> tmpDebugKF1;
+            // for (auto &iter : vEdgeFrontMatchPartIndexes) tmpDebugKF1.push_back(edgeFrontMapKeyFrames[iter]);
+            // mpMapDrawer->dvpKFs1 = tmpDebugKF1;
+            // std::vector<KeyFrame *> tmpDebugKF3;
+            // for (auto &iter : vEdgeFrontMatchIndexes) tmpDebugKF3.push_back(edgeFrontMapKeyFrames[iter]);
+            // mpMapDrawer->dvpKFs3 = tmpDebugKF3;
 
-            if (mbOldUdf || mbNewUdf) {
-                // 【核心修复：绝对单位阵注入，锁定平滑后的 CloudMap】
-                // 此时 CloudMap 已经在内存中通过 Sim(3) 插值补偿被完美掰弯，首尾已经贴合红圈。
-                // 注入单位阵，防止原生的 ComputeSubmapSim3 因为伪造特征点产生错误的拉扯。
-                mgSwEdgeFrontCloud = g2o::Sim3(Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(), 1.0);
-                bComputeEdgeFront = true;
-                cerr << "\033[1;32m[CloudMerging] Bypass 1st ComputeSubmapSim3. Injected Identity Sim3 to PROTECT CloudMap!\033[0m" << endl;
-            } else {
-                bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
-            }
-
+            cerr << "First Merge EdgeFront Map KF num: " << mpCurrentEdgeFrontMap->GetAllKeyFrames().size() << endl;
+            cerr << "First Merge Cloud Map KF num: " << mpCurrentCloudMap->GetAllKeyFrames().size() << endl;
+            cerr << "First Merge Rand Select KF ratio: " << mEdgeFrontCloudKeyFrameRandSelectMatch.size() << " / " << mpEdgeFrontCloudKeyFrameMatch.size() << endl;
+            bool bComputeEdgeFront = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mpEdgeFrontCloudKeyFrameMatch, mEdgeFrontCloudKeyFrameRandSelectMatch, false, mgSwEdgeFrontCloud, mvpEdgeFrontCloudMatchedKeyPoints, mpMapDrawer, mbOldUdf, mbNewUdf, false);
             // ***************** 第四步，Merge Map *****************
             if (bComputeEdgeFront || mbMergeAnyway) {
+                // w -> world, m -> match keyframe camera, c -> current keyframe camera
+                // l -> last keyframe camera, 但注意这里的mg2oMergeSlw中的 l 已经变成了当前帧，作者没有用一个新的变量
+                // 在CloudMergeLocal未改好的情况下，临时测试用
+                // auto iter = mpEdgeFrontCloudKeyFrameMatch.begin();
+                // std::advance(iter, rand() % mpEdgeFrontCloudKeyFrameMatch.size());
+                // mpRandEdgeFrontKF = edgeFrontMapKeyFrames[iter->first];
+                // mpRandEdgeFrontCloudKF = cloudMapKeyFrames[iter->second];
+
+                // mpTracker->SetStepByStep(true);
+
                 Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
 
+                // ***************** 子地图合并函数 *****************
+                // Flag that is true only when we stopped a running BA, in this case we need relaunch at the end of the merge
                 bool bRelaunchBA = false;
 
+                // Verbose::PrintMess("MERGE-VISUAL: Check Full Bundle Adjustment", Verbose::VERBOSITY_DEBUG);
+                //  If a Global Bundle Adjustment is running, abort it
                 if (isRunningGBA()) {
                     unique_lock<mutex> lock(mMutexGBA);
                     mbStopGBA = true;
+
                     mnFullBAIdx++;
 
                     if (mpThreadGBA) {
@@ -512,121 +267,96 @@ void CloudMerging::Run(bool bOnline) {
                 }
 
                 // Merge !!!
-                CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
+                CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true); //mgSwEdgeFrontCloud为求解得到的变换矩阵 mvpEdgeFrontCloudMatchedKeyPoints为uv匹配的关键点
+
+                // Atlas删除没有的Map
                 mpAtlas->RemoveBadMaps();
 
                 if (bRelaunchBA) {
-                    mbRunningGBA = false;
-                    mbFinishedGBA = true;
+                    // Launch a new thread to perform Global Bundle Adjustment
+                    mbRunningGBA = true;
+                    mbFinishedGBA = false;
                     mbStopGBA = false;
+                    // TODO 目前输入参数的nLoopKF不确定是否有影响，初步看上去只是区分是否是MergeLocal引发的GlobalBA，只要mnId不是Map Origin即可
                     mpThreadGBA = new thread(&CloudMerging::RunGlobalBundleAdjustment, this, mpCurrentEdgeFrontMap, mpCurrentEdgeFrontMap->GetOriginKF()->mnId);
                 }
-                Verbose::PrintMess("Merge finished!", Verbose::VERBOSITY_QUIET);
-                
+                Verbose::PrintMess("Merge finished!!", Verbose::VERBOSITY_QUIET);
+                // ***************** 子地图合并完成 *****************
+                // SaveKeyFrameTrajectoryTUM(mpCurrentEdgeFrontMap, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/first_merge.txt");
+
+                // @note Debug
+                // return;
+
                 // ***************** 开始edgeback部分 *****************
+                // 这里取出Map的KeyFrames进行匹配，可能会和LoopClosing线程Loop Closing或者Merge时的Map Update冲突
                 const vector<KeyFrame *> &newEdgeFrontMapKeyFrames = mpCurrentEdgeFrontMap->GetAllKeyFrames();
                 const vector<KeyFrame *> &edgeBackMapKeyFrames = mpCurrentEdgeBackMap->GetAllKeyFrames();
                 std::vector<bool> edgeBackHaveMatchFlag(edgeBackMapKeyFrames.size(), false);
-                
-                // 【核心修复 2：后段地图的弹性最近邻匹配】
-                double matchToleranceTimeBack = 0.05; 
-
+                // 由于EdgeFront和Cloud已经被合并了，KeyFrames也改变了，重新匹配，应该匹配数量不会变，只是KeyFrame ID变了
                 for (unsigned long newEdgeFrontKF_i = 0; newEdgeFrontKF_i < newEdgeFrontMapKeyFrames.size(); newEdgeFrontKF_i++) {
-                    double minDelta = 1e9;
-                    int bestBackIdx = -1;
-
                     for (unsigned long edgeBackKF_i = 0; edgeBackKF_i < edgeBackMapKeyFrames.size(); edgeBackKF_i++) {
-                        if (edgeBackHaveMatchFlag[edgeBackKF_i]) { 
-                            continue; 
-                        }
-                        
+                        if (edgeBackHaveMatchFlag[edgeBackKF_i]) { continue; }
                         double deltaTime = abs(edgeBackMapKeyFrames[edgeBackKF_i]->mTimeStamp - newEdgeFrontMapKeyFrames[newEdgeFrontKF_i]->mTimeStamp);
-                        
-                        if (deltaTime < matchToleranceTimeBack && deltaTime < minDelta) {
-                            minDelta = deltaTime;
-                            bestBackIdx = edgeBackKF_i;
+                        if (deltaTime < matchToleranceTime) {
+                            mpNewEdgeFrontEdgeBackKeyFrameMatch[newEdgeFrontKF_i] = edgeBackKF_i;
+                            edgeBackHaveMatchFlag[edgeBackKF_i] = true;
+                            break;
                         }
-                    }
-                    
-                    if (bestBackIdx != -1) {
-                        mpNewEdgeFrontEdgeBackKeyFrameMatch[newEdgeFrontKF_i] = bestBackIdx;
-                        edgeBackHaveMatchFlag[bestBackIdx] = true;
                     }
                 }
-
                 if (mpNewEdgeFrontEdgeBackKeyFrameMatch.size() < 1) {
-                    cerr << "\033[1;31m匹配EdgeBack和New Cloud Map的KeyFrames数量过少\033[0m" << endl;
-                    
-                    mpCurrentEdgeBackMap->ResetHaveMerged();
-                    mbRunning = false;
-                    
-                    if (mpCurrentCloudMap) {
-                        delete mpCurrentCloudMap;
-                        mpCurrentCloudMap = nullptr;
-                    }
-                    mpCurrentEdgeFrontMap = nullptr;
-                    mpCurrentEdgeBackMap = nullptr;
-                    
-                    mpEdgeFrontCloudKeyFrameMatch.clear();
-                    mvpEdgeFrontCloudMatchedKeyPoints.clear();
-                    mgSwEdgeFrontCloud = g2o::Sim3();
-                    mpNewEdgeFrontEdgeBackKeyFrameMatch.clear();
-                    mvpNewEdgeFrontEdgeBackMatchedKeyPoints.clear();
-                    mgSwNewCloudEdgeBack = g2o::Sim3();
-                    continue;
+                    cerr << "匹配EdgeBack和New Cloud Map的KeyFrames数量过少" << endl;
+                    return;
                 }
 
                 std::vector<int> vNewEdgeFrontMatchIndexes;
-                for (auto &iter : mpNewEdgeFrontEdgeBackKeyFrameMatch) {
-                    vNewEdgeFrontMatchIndexes.push_back(iter.first);
-                }
-                sort(vNewEdgeFrontMatchIndexes.begin(), vNewEdgeFrontMatchIndexes.end(), [&](int x, int y) { 
-                    return newEdgeFrontMapKeyFrames[x]->mTimeStamp < newEdgeFrontMapKeyFrames[y]->mTimeStamp; 
-                });
-                
+                for (auto &iter : mpNewEdgeFrontEdgeBackKeyFrameMatch) vNewEdgeFrontMatchIndexes.push_back(iter.first);
+                sort(vNewEdgeFrontMatchIndexes.begin(), vNewEdgeFrontMatchIndexes.end(), [&](int x, int y) { return newEdgeFrontMapKeyFrames[x]->mTimeStamp < newEdgeFrontMapKeyFrames[y]->mTimeStamp; });
+                // @note 暂时关闭这个处理
+                // std::vector<int> vNewEdgeFrontMatchPartIndexes(vNewEdgeFrontMatchIndexes.end() - int(mpNewEdgeFrontEdgeBackKeyFrameMatch.size() * (8. / 10.)), vNewEdgeFrontMatchIndexes.end());
                 std::vector<int> vNewEdgeFrontMatchPartIndexes(vNewEdgeFrontMatchIndexes.end() - min(int(vNewEdgeFrontMatchIndexes.size()), nLimitMaxMatchKFNum), vNewEdgeFrontMatchIndexes.end());
                 std::map<int, int> mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch;
-                for (auto &iter : vNewEdgeFrontMatchPartIndexes) {
-                    mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch[iter] = mpNewEdgeFrontEdgeBackKeyFrameMatch[iter];
-                }
+                for (auto &iter : vNewEdgeFrontMatchPartIndexes) mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch[iter] = mpNewEdgeFrontEdgeBackKeyFrameMatch[iter];
 
-                bool bComputeEdgeBack = false;
+                // std::vector<KeyFrame *> tmpDebugKF1;
+                // for (auto &iter : vNewEdgeFrontMatchPartIndexes) tmpDebugKF1.push_back(edgeBackMapKeyFrames[mpNewEdgeFrontEdgeBackKeyFrameMatch[iter]]);
+                // mpMapDrawer->dvpKFs1 = tmpDebugKF1;
+                // std::vector<KeyFrame *> tmpDebugKF3;
+                // for (auto &iter : vNewEdgeFrontMatchIndexes) tmpDebugKF3.push_back(edgeBackMapKeyFrames[mpNewEdgeFrontEdgeBackKeyFrameMatch[iter]]);
+                // mpMapDrawer->dvpKFs3 = tmpDebugKF3;
 
-                if (mbOldUdf || mbNewUdf) {
-                    // 【核心修复：绝对单位阵注入，物理锚定 EdgeBack】
-                    // 物理前提：OKVIS 维持了全局连续的度量空间，EdgeFront 和 EdgeBack 已经处于同一个完美的物理坐标系下。
-                    // 任何非单位阵的 Sim(3) 变换都会导致 EdgeBack 被错误地拉扯产生位移（变成图中黑色的错误轨迹）。
-                    // 因此，我们强制注入单位阵，让后续的 CloudMergeMap 仅仅执行“内存指针合并”，绝不修改任何 XYZ 坐标。
-                    mgSwNewCloudEdgeBack = g2o::Sim3(Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(), 1.0);
-                    bComputeEdgeBack = true;
-                    cerr << "\033[1;32m[CloudMerging] Bypass 2nd ComputeSubmapSim3. Injected Identity Sim3 to PROTECT EdgeBack!\033[0m" << endl;
-                } else {
-                    // 只有在非 UDF (纯视觉特征) 模式下，才走原生的特征点匹配求解逻辑
-                    bool mbedge_merge = false;
-                    bComputeEdgeBack = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mpNewEdgeFrontEdgeBackKeyFrameMatch, mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch, false, mgSwNewCloudEdgeBack, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpMapDrawer, false, false, mbedge_merge);
-                }
+                // for (auto iter : mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch)
+                //     cerr << "select match: " << iter.first << " " << iter.second << endl;
 
-                // std::vector<int> vNewEdgeFrontMatchPartIndexes(vNewEdgeFrontMatchIndexes.end() - min(int(vNewEdgeFrontMatchIndexes.size()), nLimitMaxMatchKFNum), vNewEdgeFrontMatchIndexes.end());
-                // std::map<int, int> mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch;
-                // for (auto &iter : vNewEdgeFrontMatchPartIndexes) {
-                //     mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch[iter] = mpNewEdgeFrontEdgeBackKeyFrameMatch[iter];
-                // }
-
-                // cerr << "Second Merge Main Map KF num: " << mpCurrentEdgeFrontMap->GetAllKeyFrames().size() << endl;
-                // cerr << "Second Merge EdgeBack Map KF num: " << mpCurrentEdgeBackMap->GetAllKeyFrames().size() << endl;
-                // cerr << "Second Merge Rand Select KF ratio: " << mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch.size() << " / " << mpNewEdgeFrontEdgeBackKeyFrameMatch.size() << endl;
-                
-                // bool mbedge_merge = mbOldUdf || mbNewUdf;
-                // bool bComputeEdgeBack = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mpNewEdgeFrontEdgeBackKeyFrameMatch, mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch, false, mgSwNewCloudEdgeBack, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpMapDrawer, false, false, mbedge_merge);
-                
+                // After Merge EdgeFront and Cloud Map, Merge New Cloud Map(still EdgeFront) and EdgeBack Map
+                cerr << "Second Merge Main Map KF num: " << mpCurrentEdgeFrontMap->GetAllKeyFrames().size() << endl;
+                cerr << "Second Merge EdgeBack Map KF num: " << mpCurrentEdgeBackMap->GetAllKeyFrames().size() << endl;
+                cerr << "Second Merge Rand Select KF ratio: " << mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch.size() << " / " << mpNewEdgeFrontEdgeBackKeyFrameMatch.size() << endl;
+                bool mbedge_merge = mbOldUdf || mbNewUdf;
+                bool bComputeEdgeBack = CloudMerging::ComputeSubmapSim3(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mpNewEdgeFrontEdgeBackKeyFrameMatch, mNewEdgeFrontEdgeBackKeyFrameRandSelectMatch, false, mgSwNewCloudEdgeBack, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpMapDrawer, false, false, mbedge_merge);
                 if (bComputeEdgeBack || mbMergeAnyway) {
+                    // w -> world, m -> match keyframe camera, c -> current keyframe camera
+                    // l -> last keyframe camera, 但注意这里的mg2oMergeSlw中的 l 已经变成了当前帧，作者没有用一个新的变量
+                    // 在CloudMergeLocal未改好的情况下，临时测试用
+                    // auto iter = mpNewEdgeFrontEdgeBackKeyFrameMatch.begin();
+                    // std::advance(iter, rand() % mpNewEdgeFrontEdgeBackKeyFrameMatch.size());
+                    // mpRandEdgeBackNewCloudKF = newEdgeFrontMapKeyFrames[iter->first];
+                    // mpRandEdgeBackKF = edgeBackMapKeyFrames[iter->second];
+
+                    // mpTracker->SetStepByStep(true);
+
                     Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
 
+                    // ***************** 子地图合并函数 *****************
+                    // Flag that is true only when we stopped a running BA, in this case we need relaunch at the end of the merge
                     bool bRelaunchBA = false;
 
+                    // Verbose::PrintMess("MERGE-VISUAL: Check Full Bundle Adjustment", Verbose::VERBOSITY_DEBUG);
+                    //  If a Global Bundle Adjustment is running, abort it
                     if (isRunningGBA()) {
                         unique_lock<mutex> lock(mMutexGBA);
                         mbStopGBA = true;
+
                         mnFullBAIdx++;
 
                         if (mpThreadGBA) {
@@ -637,9 +367,12 @@ void CloudMerging::Run(bool bOnline) {
                     }
 
                     // Merge !!!
-                    CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true, mbOldUdf, mbNewUdf); 
-                    delete mpCurrentCloudMap; 
-                    
+                    CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true);
+
+                    // 改变Active Map为合并后的Map
+                    // 旧的Map不会删除，但是会设置为Bad
+                    delete mpCurrentCloudMap; // Cloud Map没有添加到Atlas里，所以不需要管，可以考虑直接delete掉清理内存
+                    // @note EdgeFrontMap本身就在里面，不需要改变CurrentMap
                     if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
                         mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
                     }
@@ -650,12 +383,16 @@ void CloudMerging::Run(bool bOnline) {
                     mpAtlas->RemoveBadMaps();
 
                     if (bRelaunchBA) {
-                        mbRunningGBA = false;
-                        mbFinishedGBA = true;
+                        // Launch a new thread to perform Global Bundle Adjustment
+                        mbRunningGBA = true;
+                        mbFinishedGBA = false;
                         mbStopGBA = false;
+                        // TODO 目前输入参数的nLoopKF不确定是否有影响，初步看上去只是区分是否是MergeLocal引发的GlobalBA，只要mnId不是Map Origin即可
                         mpThreadGBA = new thread(&CloudMerging::RunGlobalBundleAdjustment, this, mpCurrentEdgeFrontMap, mpCurrentEdgeFrontMap->GetOriginKF()->mnId);
                     }
                     Verbose::PrintMess("Merge finished!", Verbose::VERBOSITY_QUIET);
+                    // ***************** 子地图合并完成 *****************
+                    // SaveKeyFrameTrajectoryTUM(mpCurrentEdgeFrontMap, "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results/second_merge.txt");
                 } else {
                     mpCurrentEdgeBackMap->ResetHaveMerged();
                 }
@@ -665,6 +402,7 @@ void CloudMerging::Run(bool bOnline) {
             cerr << "测试：退出此次Merge" << endl;
             mbRunning = false;
 
+            // Reset Var
             mpCurrentCloudMap = static_cast<Map *>(NULL);
             mpCurrentEdgeFrontMap = static_cast<Map *>(NULL);
             mpCurrentEdgeBackMap = static_cast<Map *>(NULL);
@@ -690,12 +428,13 @@ void CloudMerging::Run(bool bOnline) {
         usleep(5000);
     }
 
-    SetFinish();
+    SetFinish();//化新的视觉-惯性地图，并成为活
 }
 
 void CloudMerging::InsertCloudMap(Map *pMap) {
     unique_lock<mutex> lock(mMutexCloudQueue);
     mlpCloudMapQueue.push_back(pMap);
+    // TODO add to debug queue
 }
 
 bool CloudMerging::CheckNewCloudMap(bool bOnline) {
@@ -709,24 +448,27 @@ bool CloudMerging::CheckNewCloudMap(bool bOnline) {
 }
 
 //cap-udf
-void split(std::string& string_input, std::vector<std::string>&string_output, std::string& delema1) {
-	std::string::size_type start = string_input.find_first_not_of(delema1, 0);
-	std::string::size_type pose = string_input.find_first_of(delema1, start);
-	while (std::string::npos != start || std::string::npos != pose) {
+void split(std::string& string_input, std::vector<std::string>&string_output, std::string& delema1)
+{
+	std::string::size_type start = string_input.find_first_not_of(delema1, 0);//找到第一个不为delema1的下标
+	std::string::size_type pose = string_input.find_first_of(delema1, start);//找到第一个delema1的下标
+	while (std::string::npos != start || std::string::npos != pose) {//当即没有delema1也没有字符的时候结束
 		string_output.push_back(string_input.substr(start, pose - start));
-		start = string_input.find_first_not_of(delema1, pose);
-		pose = string_input.find_first_of(delema1, start);
+		start = string_input.find_first_not_of(delema1, pose);//更新start 从pose开始
+		pose = string_input.find_first_of(delema1, start);//更新pose,从start开始再次寻找
 	}
 }
 
-bool get_parameter_xyz(std::string path, pcl::PointCloud<pcl::PointXYZ> &cloud) {
+bool get_parameter_xyz(std::string path, pcl::PointCloud<pcl::PointXYZ> &cloud)
+{
 	cloud.clear();
 	std::ifstream inf(path);
-	std::string sline;
+	std::string sline;//每一行
 	std::vector<std::string>string_output;
 	std::string Delema = " ";
 	pcl::PointXYZ point3d;
-	while (getline(inf, sline)) {
+	while (getline(inf, sline))
+	{
 		int i = 0;
 		split(sline, string_output, Delema);
 		point3d.x = stold(string_output[i]);
@@ -736,12 +478,12 @@ bool get_parameter_xyz(std::string path, pcl::PointCloud<pcl::PointXYZ> &cloud) 
 		cloud.push_back(point3d);
 	}
 	inf.close();
-    return true;
+  return true;
 }
 
 bool get_xyz(vector<MapPoint *> point_test, pcl::PointCloud<pcl::PointXYZ> &edge_point) {
     pcl::PointXYZ point_trans;
-    for (int n = 0; n < point_test.size(); n++) {
+    for (int n = 0; n < point_test.size(); n++){
         Eigen::Vector3f mpWorldPos = point_test[n]->GetWorldPos();
         point_trans.x = mpWorldPos[0];
         point_trans.y = mpWorldPos[1];
@@ -752,6 +494,13 @@ bool get_xyz(vector<MapPoint *> point_test, pcl::PointCloud<pcl::PointXYZ> &edge
 }
 
 bool next_iteration = false;
+
+// void keyboardEventOccurred (const pcl::visualization::KeyboardEvent& event, void* nothing)
+// {
+//   if (event.getKeySym () == "space" && event.keyDown ())
+//     next_iteration = true;
+// }
+
 //cap-udf
 
 /*!
@@ -759,16 +508,17 @@ bool next_iteration = false;
  * @return
  */
 bool CloudMerging::ComputeSubmapSim3(
-    Map *pMap1, Map *pMap2, const std::map<int, int> &mKfMatch12,                  
-    const std::map<int, int> &mRandSelectKfMatch12,                                
-    bool bFixScale,                                                                
-    g2o::Sim3 &gSw1w2,                                                             
-    std::map<KeyFrame *, std::vector<std::pair<int, int>>> &mvpMatchedKeyPoints12, 
-    MapDrawer *pMapDrawer,                                                         
+    Map *pMap1, Map *pMap2, const std::map<int, int> &mKfMatch12,                  // input //第一次map1为边图，map2为云图 
+    const std::map<int, int> &mRandSelectKfMatch12,                                // input //第二次map1为front边+云，map2edge边
+    bool bFixScale,                                                                // input //false
+    g2o::Sim3 &gSw1w2,                                                             // output
+    std::map<KeyFrame *, std::vector<std::pair<int, int>>> &mvpMatchedKeyPoints12, // output
+    MapDrawer *pMapDrawer,                                                         // debug
     bool mbOldUdf,
     bool mbNewUdf,
     bool mbedge_merge
 ) {
+    // check input
     if (!pMap1 || !pMap2) {
         cerr << "Map Input Error!" << endl;
         return 0;
@@ -781,56 +531,94 @@ bool CloudMerging::ComputeSubmapSim3(
     const vector<KeyFrame *> &vpMap1KeyFrames = pMap1->GetAllKeyFrames();
     const vector<KeyFrame *> &vpMap2KeyFrames = pMap2->GetAllKeyFrames();
 
-    int matchMapPointNum = 0; 
+    // 计算所有KF之间的MapPoint匹配情况
+    int matchMapPointNum = 0; // For Debug
     std::map<KeyFrame *, std::vector<MapPoint *>> mvpMatchedPoints12;
-    std::map<KeyFrame *, std::vector<std::pair<int, int>>> mvpValidMatchedKeyPoints12; 
+    // std::map<KeyFrame *, std::vector<std::pair<int, int>>> mvpMatchedKeyPoints12;
+    std::map<KeyFrame *, std::vector<std::pair<int, int>>> mvpValidMatchedKeyPoints12; // 只记录有对应mappoint对应的keypoint match
     std::map<KeyFrame *, int> mvpMatchedPointsNum12;
 
     std::chrono::steady_clock::time_point timeStartMatchMapPoints = std::chrono::steady_clock::now();
 
-    for (auto iter = mKfMatch12.begin(); iter != mKfMatch12.end(); iter++) { 
-        KeyFrame *pMap1KF = vpMap1KeyFrames[iter->first]; 
-        KeyFrame *pMap2KF = vpMap2KeyFrames[iter->second]; 
+    // for (auto iter = mKfMatch12.begin(); iter != mKfMatch12.end(); iter++) { // TODO 三层For循环，最好统计一下耗时
+    //     KeyFrame *pMap1KF = vpMap1KeyFrames[iter->first];
+    //     KeyFrame *pMap2KF = vpMap2KeyFrames[iter->second];
 
-        const std::vector<MapPoint *> &vpMap1MapPoints = pMap1KF->GetMapPointMatches(); 
+    //     const std::vector<MapPoint *> &vpMap1MapPoints = pMap1KF->GetMapPointMatches();
+    //     const std::vector<MapPoint *> &vpMap2MapPoints = pMap2KF->GetMapPointMatches();
+    //     std::vector<MapPoint *> vpMatchedPoints12(vpMap1MapPoints.size(), static_cast<MapPoint *>(NULL));
+    //     std::vector<std::pair<int, int>> vpMatchedKeyPoints12;
+    //     std::vector<std::pair<int, int>> vpValidMatchedKeyPoints12;
+
+    //     // 开始匹配MapPoints
+    //     int matchNum = 0;
+    //     const std::vector<cv::KeyPoint> &map1KFKPs = pMap1KF->mvKeys;
+    //     const std::vector<cv::KeyPoint> &map2KFKPs = pMap2KF->mvKeys;
+    //     for (unsigned long map1KFKP_i = 0; map1KFKP_i < map1KFKPs.size(); ++map1KFKP_i) { // TODO 这里可能有现成函数直接匹配，这里暴力实现
+    //         for (unsigned long map2KFKP_i = 0; map2KFKP_i < map2KFKPs.size(); ++map2KFKP_i) {
+    //             const float map1_u = map1KFKPs[map1KFKP_i].pt.x;
+    //             const float map1_v = map1KFKPs[map1KFKP_i].pt.y;
+    //             const float map2_u = map2KFKPs[map2KFKP_i].pt.x;
+    //             const float map2_v = map2KFKPs[map2KFKP_i].pt.y;
+    //             const auto delta_pixel = (float)sqrt(pow(map1_u - map2_u, 2) + pow(map1_v - map2_v, 2));
+    //             if (delta_pixel < keyPointMatchTolerancePixel) {
+    //                 matchNum++;
+    //                 vpMatchedPoints12[map1KFKP_i] = vpMap2MapPoints[map2KFKP_i];
+    //                 vpMatchedKeyPoints12.push_back(std::pair<int, int>(map1KFKP_i, map2KFKP_i));
+    //                 if (vpMap1MapPoints[map1KFKP_i] && vpMap2MapPoints[map2KFKP_i]) // 两个mappoint非空，需要debug确认NULL pointer
+    //                     vpValidMatchedKeyPoints12.push_back(std::pair<int, int>(map1KFKP_i, map2KFKP_i));
+    //             }
+    //         }
+    //     }
+
+    //     matchMapPointNum += matchNum;
+    //     mvpMatchedPointsNum12[vpMap1KeyFrames[iter->first]] = matchNum;
+    //     mvpMatchedPoints12[vpMap1KeyFrames[iter->first]] = vpMatchedPoints12;
+    //     mvpMatchedKeyPoints12[vpMap1KeyFrames[iter->first]] = vpMatchedKeyPoints12;
+    //     mvpValidMatchedKeyPoints12[vpMap1KeyFrames[iter->first]] = vpValidMatchedKeyPoints12;
+    // }
+
+    /*********** 利用ORBSLAM构造Frame时固有的keypoint网格划分来加速匹配MapPoint***********/
+    for (auto iter = mKfMatch12.begin(); iter != mKfMatch12.end(); iter++) { // mfKMatch12是云图与边图的关键帧匹配
+        KeyFrame *pMap1KF = vpMap1KeyFrames[iter->first]; //获取边图关键帧
+        KeyFrame *pMap2KF = vpMap2KeyFrames[iter->second]; //获取云图关键帧
+
+        const std::vector<MapPoint *> &vpMap1MapPoints = pMap1KF->GetMapPointMatches(); //获取关键匹配帧对应的点云
         const std::vector<MapPoint *> &vpMap2MapPoints = pMap2KF->GetMapPointMatches();
         std::vector<MapPoint *> vpMatchedPoints12(vpMap1MapPoints.size(), static_cast<MapPoint *>(NULL));
         std::vector<std::pair<int, int>> vpMatchedKeyPoints12;
         std::vector<std::pair<int, int>> vpValidMatchedKeyPoints12;
 
+        // 开始匹配MapPoints
         int matchNum = 0;
-        const std::vector<cv::KeyPoint> &map1KFKPs = pMap1KF->mvKeys; 
+        const std::vector<cv::KeyPoint> &map1KFKPs = pMap1KF->mvKeys; //关键帧的uv坐标
         const std::vector<cv::KeyPoint> &map2KFKPs = pMap2KF->mvKeys;
-        
-        for (unsigned long map1KFKP_i = 0; map1KFKP_i < map1KFKPs.size(); ++map1KFKP_i) { 
-            const float map1_u = map1KFKPs[map1KFKP_i].pt.x; 
+        for (unsigned long map1KFKP_i = 0; map1KFKP_i < map1KFKPs.size(); ++map1KFKP_i) { //边图uv描述扫描
+            const float map1_u = map1KFKPs[map1KFKP_i].pt.x; //uv描述符
             const float map1_v = map1KFKPs[map1KFKP_i].pt.y;
             const vector<size_t> vIndices = pMap2KF->GetFeaturesInArea(map1_u, map1_v, keyPointMatchTolerancePixel);
 
-            if (vIndices.empty()) {
+            if (vIndices.empty())
                 continue;
-            }
 
-            float best_dist = keyPointMatchTolerancePixel; 
+            float best_dist = keyPointMatchTolerancePixel; //3
             int best_idx = -1;
-            for (vector<size_t>::const_iterator vit = vIndices.begin(), vend = vIndices.end(); vit != vend; vit++) { 
+            for (vector<size_t>::const_iterator vit = vIndices.begin(), vend = vIndices.end(); vit != vend; vit++) { // 选择3X3网格中距离query MapPoint最近的MapPoint in Map2
                 const size_t map2KFKP_i = *vit;
                 const float map2_u = map2KFKPs[map2KFKP_i].pt.x;
                 const float map2_v = map2KFKPs[map2KFKP_i].pt.y;
                 const float delta_pixel = (float)sqrt(pow(map1_u - map2_u, 2) + pow(map1_v - map2_v, 2));
-                
                 if (delta_pixel < best_dist && vpMap1MapPoints[map1KFKP_i] && vpMap2MapPoints[map2KFKP_i]) {
                     best_idx = map2KFKP_i;
                     best_dist = delta_pixel;
                 }
             }
-            if (best_idx == -1) {
+            if (best_idx == -1)
                 continue;
-            }
 
             matchNum++;
             vpMatchedPoints12[map1KFKP_i] = vpMap2MapPoints[best_idx];
-            vpMatchedKeyPoints12.push_back(std::pair<int, int>(map1KFKP_i, best_idx)); 
+            vpMatchedKeyPoints12.push_back(std::pair<int, int>(map1KFKP_i, best_idx)); //这两个一样的?
             vpValidMatchedKeyPoints12.push_back(std::pair<int, int>(map1KFKP_i, best_idx));
         }
 
@@ -854,7 +642,6 @@ bool CloudMerging::ComputeSubmapSim3(
     matchMap2KeyFrames.reserve(mKfMatch12.size());
     avpMatchedPoints.reserve(mKfMatch12.size());
     avpValidKPMatches.reserve(mKfMatch12.size());
-    
     for (auto iter = mKfMatch12.begin(); iter != mKfMatch12.end(); iter++) {
         matchMap1KeyFrames.push_back(vpMap1KeyFrames[iter->first]);
         matchMap2KeyFrames.push_back(vpMap2KeyFrames[iter->second]);
@@ -862,43 +649,239 @@ bool CloudMerging::ComputeSubmapSim3(
         avpValidKPMatches.push_back(mvpValidMatchedKeyPoints12[vpMap1KeyFrames[iter->first]]);
     }
 
-    float OptimizeInliersRatio = 0.0;
-    
-    // 【核心修复 1：UDF 模式视觉算法全量旁路 (Bypass)】
-    if (mbOldUdf || mbNewUdf || mbedge_merge) {
-        auto iter = mRandSelectKfMatch12.begin();
-        KeyFrame* pKF1 = vpMap1KeyFrames[iter->first];
-        KeyFrame* pKF2 = vpMap2KeyFrames[iter->second];
+    // @note Umeyama Solve Sim3
+    vector<Eigen::Vector3d> map1MatchKFPoints;
+    vector<Eigen::Vector3d> map2MatchKFPoints;
+    // for (auto &iter : mKfMatch12) {
+    for (auto &iter : mRandSelectKfMatch12) {
+        map1MatchKFPoints.push_back(vpMap1KeyFrames[iter.first]->GetPoseInverse().translation().cast<double>()); //得到了什么？调试看看
+        map2MatchKFPoints.push_back(vpMap2KeyFrames[iter.second]->GetPoseInverse().translation().cast<double>());
+    }
+    assert(map1MatchKFPoints.size() == map2MatchKFPoints.size()); //确保两者一致
+    Eigen::Matrix4d umeyamaResult = Sim3Solver::umeyamaSolve(map2MatchKFPoints, map1MatchKFPoints);
+    Sophus::Sim3d sSc1c2(umeyamaResult.cast<double>()); //.cast<double() 变成4+3+1类型？
+    Eigen::Matrix3d tmp_R = sSc1c2.rotationMatrix();
+    Eigen::Vector3d tmp_T = sSc1c2.translation();
+    double tmp_s = sSc1c2.scale();
+    g2o::Sim3 gUmeyamaSw1w2 = g2o::Sim3(tmp_R, tmp_T, tmp_s); // g2o::Sim3: kf camera 2 -> kf camera 1，是输入求解的两个关键帧之间的Sim3变换，注意是2->1
 
-        Sophus::SE3f Tw1_c = pKF1->GetPoseInverse();
-        Sophus::SE3f Tc_w2 = pKF2->GetPose();
-        Sophus::SE3f Tw1_w2 = Tw1_c * Tc_w2;
+    // float nInliersRatio;
+    // bool bUmeyamaNoMore;
+    // bool bUmeyamaConverge;
+    // UmeyamaSim3Solver umeyamaSolver(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches);
+    // umeyamaSolver.SetRansacParameters(0.99, nUmeyamaSolveSim3InliersRatio, 30, nUmeyamaSolveSim3KFNum);
+    // g2o::Sim3 gUmeyamaSw1w2 = umeyamaSolver.iterate(20, bUmeyamaNoMore, nInliersRatio, bUmeyamaConverge);
+    // if (bUmeyamaConverge) {
+    //     cerr << "Umeyama RANSAC Converge: " << nInliersRatio << endl;
+    // } else {
+    //     cerr << "Umeyama RANSAC Converge Fail: " << nInliersRatio << endl;
+    // }
 
-        gSw1w2 = g2o::Sim3(Tw1_w2.rotationMatrix().cast<double>(), Tw1_w2.translation().cast<double>(), 1.0);
-        
-        cerr << "\033[1;32m[UDF BYPASS] Skipping visual Umeyama. Sim3 initialized from Anchor KF.\033[0m" << endl;
-    } 
-    else {
-        if (mRandSelectKfMatch12.size() >= 3) {
-            vector<Eigen::Vector3d> map1MatchKFPoints;
-            vector<Eigen::Vector3d> map2MatchKFPoints;
-            for (auto &iter : mRandSelectKfMatch12) {
-                map1MatchKFPoints.push_back(vpMap1KeyFrames[iter.first]->GetPoseInverse().translation().cast<double>());
-                map2MatchKFPoints.push_back(vpMap2KeyFrames[iter.second]->GetPoseInverse().translation().cast<double>());
-            }
-            Eigen::Matrix4d umeyamaResult = Sim3Solver::umeyamaSolve(map2MatchKFPoints, map1MatchKFPoints);
-            Sophus::Sim3d sSc1c2(umeyamaResult.cast<double>());
-            gSw1w2 = g2o::Sim3(sSc1c2.rotationMatrix(), sSc1c2.translation(), sSc1c2.scale()); 
-            
-            Eigen::Matrix<double, 7, 7> mHessian7x7;
-            OptimizeInliersRatio = Optimizer::OptimizeCloudSim3(matchMap1KeyFrames, matchMap2KeyFrames, avpMatchedPoints, gSw1w2, 10, true, mHessian7x7, true);
-        } else {
-            cerr << "\033[1;31m[ERROR] Not enough matched KFs (< 3) for Visual Umeyama!\033[0m" << endl;
-            return false;
+    std::chrono::steady_clock::time_point timeStartComputeInliers = std::chrono::steady_clock::now();
+
+    float umeyamaInliersRatio = Sim3Solver::ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gUmeyamaSw1w2); //计算umeyama位姿的内点数
+
+    std::chrono::steady_clock::time_point timeEndComputeInliers = std::chrono::steady_clock::now();
+    time = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(timeEndComputeInliers - timeStartComputeInliers).count();
+    cerr << "Test: umeyama Compute Inliers Time " << time << endl;
+
+    // @note 初步实现先随机抽取Edge Map和Cloud Map对应的两帧，求解初步的Sim3
+    bool bFixedScale = bFixScale;
+
+    bool bNoMore = false;
+    vector<bool> vbInliers;
+    int nInliers;
+    bool bConverge = false;
+    Eigen::Matrix4f mTcm;
+    Eigen::Matrix3d solveR;
+    Eigen::Vector3d solveT;
+    double solveS;
+
+    g2o::Sim3 gRANSACSw1w2;
+    bool bRANSACConverge;
+
+    /**********设置一系列best变量，记录循环中最优的Sim3初值***********/
+    float bestInlierRatio = 0;
+    Eigen::Matrix3f bestRotation;
+    Eigen::Vector3f bestTranslation;
+    float bestScale;
+    int bestMatch1Index = 1;
+
+    std::vector<int> vMatch1Indexes;
+    for (auto &iter : mRandSelectKfMatch12) vMatch1Indexes.push_back(iter.first);
+    auto seed = std::chrono::system_clock::now().time_since_epoch().count();
+    shuffle(vMatch1Indexes.begin(), vMatch1Indexes.end(), std::default_random_engine(seed));
+    for (auto &iter : vMatch1Indexes) {
+        int match1Index = iter;
+        int match2Index = mRandSelectKfMatch12.at(iter);
+        // std::cerr << "rand index: " << match1Index << "   index: " << match2Index << std::endl;
+        KeyFrame *pRandSelectMap1KF = vpMap1KeyFrames[match1Index];
+        KeyFrame *pRandSelectMap2KF = vpMap2KeyFrames[match2Index];
+
+        // static int flag = 0;
+        // if (flag == 0) {
+        //     std::vector<KeyFrame *> tmpDebugKF2;
+        //     tmpDebugKF2.push_back(pRandSelectMap1KF);
+        //     pMapDrawer->dvpKFs2 = tmpDebugKF2;
+        // }
+        // if (flag == 1) {
+        //     std::vector<KeyFrame *> tmpDebugKF2;
+        //     tmpDebugKF2.push_back(pRandSelectMap2KF);
+        //     pMapDrawer->dvpKFs2 = tmpDebugKF2;
+        // }
+        // flag++;
+
+        if (mvpMatchedPointsNum12[pRandSelectMap1KF] < 5) { // @note 如果当前帧匹配pixel数量<5则放弃
+            cerr << "当前选取的匹配KF对的匹配Map Points数量是 " << mvpMatchedPointsNum12[pRandSelectMap1KF] << ", 小于5，放弃当前帧" << endl;
+            continue;
+        }
+        std::vector<MapPoint *> &vpMatchedPoints12 = mvpMatchedPoints12[pRandSelectMap1KF];
+        std::vector<KeyFrame *> vpKeyFrameMatchedMP12(vpMatchedPoints12.size(), pRandSelectMap2KF);
+
+        // @note save image for draw
+        // static bool once = false;
+        // std::vector<std::pair<int, int>> &vpMatchedKeyPoints12 = mvpMatchedKeyPoints12[pRandSelectMap1KF];
+        // if (!once) {
+        //     std::string save_dir = "/home/ruanjh/Workspace/NewSpace/Cloud-Edge-SLAM/results";
+
+        //     // save image
+        //     cv::Mat img1 = pRandSelectMap1KF->imgGray.clone();
+        //     cv::Mat img2 = pRandSelectMap2KF->imgGray.clone();
+        //     cv::imwrite(save_dir + "/" + "img1.png", img1);
+        //     cv::imwrite(save_dir + "/" + "img2.png", img1);
+
+        //     cv::FileStorage file(save_dir + "/" + "keypoint_match.yml", cv::FileStorage::WRITE);
+        //     std::vector<cv::Point2i> img1_keypoints;
+        //     std::vector<cv::Point2i> img2_keypoints;
+        //     std::vector<cv::Point2i> keypoint_match_indexes;
+        //     for (auto &keypoint : pRandSelectMap1KF->mvKeys) {
+        //         img1_keypoints.push_back(cv::Point2i(keypoint.pt.x, keypoint.pt.y));
+        //     }
+        //     for (auto &keypoint : pRandSelectMap2KF->mvKeys) {
+        //         img2_keypoints.push_back(cv::Point2i(keypoint.pt.x, keypoint.pt.y));
+        //     }
+        //     for (auto &match_index : vpMatchedKeyPoints12) {
+        //         keypoint_match_indexes.push_back(cv::Point2i(match_index.first, match_index.second));
+        //     }
+        //     cv::Mat img1_keypoint_mat(img1_keypoints);
+        //     cv::Mat img2_keypoint_mat(img2_keypoints);
+        //     cv::Mat keypoint_match_index_mat(keypoint_match_indexes);
+
+        //     file << "img1_keypoint" << img1_keypoint_mat;
+        //     file << "img2_keypoint" << img2_keypoint_mat;
+        //     file << "keypoint_match_indexes" << keypoint_match_index_mat;
+
+        //     file.release();
+
+        //     once = true;
+        // }
+
+        Sim3Solver solver = Sim3Solver(pRandSelectMap1KF, pRandSelectMap2KF, vpMatchedPoints12, bFixedScale, vpKeyFrameMatchedMP12);
+        solver.SetRansacParameters(0.99, nSolveSim3Inliers, 300);
+
+        bConverge = false;
+        bNoMore = false;
+        float oldBestRatio = bestInlierRatio;
+        while (!bConverge && !bNoMore) {
+            // ***************** 根据初步得到的Map Points匹配求解Sim3 *****************
+            // mTcm = solver.iterate(20, bNoMore, vbInliers, nInliers, bConverge);
+            mTcm = solver.iterate(20, bNoMore, vbInliers, nInliers, bConverge, matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches,
+                                  bestInlierRatio, bestRotation, bestTranslation, bestScale);
+            // cerr << "BoW guess: Solver achieve " + to_string(nInliers) + " min geometrical inliers " + to_string(nSolveSim3Inliers) + " BoW matches" << endl;
+        }
+
+        // 更新最优inlierRatio对应KF对的index
+        if (bestInlierRatio > oldBestRatio) {
+            bestMatch1Index = iter;
+        }
+
+        // cerr << "测试：求解Sim3是否不再优化：" << bNoMore << endl;
+        // cerr << "测试：求解Sim3是否收敛：" << bConverge << endl;
+        if (bConverge) {
+            bRANSACConverge = true;
+            // get solve result
+            solveR = solver.GetEstimatedRotation().cast<double>();
+            solveT = solver.GetEstimatedTranslation().cast<double>();
+            solveS = (double)solver.GetEstimatedScale();
+            g2o::Sim3 gSc1c2(solveR, solveT, solveS);
+            g2o::Sim3 gSc1w(pRandSelectMap1KF->GetRotation().cast<double>(), pRandSelectMap1KF->GetTranslation().cast<double>(), 1.0); // g2o::Sim3: kf 1 world -> kf 1 camera
+            g2o::Sim3 gSc2w(pRandSelectMap2KF->GetRotation().cast<double>(), pRandSelectMap2KF->GetTranslation().cast<double>(), 1.0); // g2o::Sim3: kf 2 world -> kf 2 camera
+            gRANSACSw1w2 = gSc1w.inverse() * gSc1c2 * gSc2w;
+            break;
         }
     }
+    cerr << "测试：RANSAC求解Sim3是否收敛：" << bRANSACConverge << endl;
+
+    float RANSACInliersRatio = 0;
+    if (bRANSACConverge) {
+        std::chrono::steady_clock::time_point timeStartComputeInliers = std::chrono::steady_clock::now();
+
+        RANSACInliersRatio = Sim3Solver::ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gRANSACSw1w2); //计算ransac位姿的内点数
+
+        std::chrono::steady_clock::time_point timeEndComputeInliers = std::chrono::steady_clock::now();
+        double time = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(timeEndComputeInliers - timeStartComputeInliers).count();
+        cerr << "Test: RANSAC Compute Inliers Time " << time << endl;
+    }
+    // else{ // 若没有收敛，则选择循环中inlierRatio最优的Sim3作为初始值
+    //     cout << "best mathch index: " << bestMatch1Index << endl;
+    //     int bestMatch2Index = mRandSelectKfMatch12.at(bestMatch1Index);
+    //     // std::cerr << "rand index: " << match1Index << "   index: " << match2Index << std::endl;
+    //     KeyFrame *pRandSelectMap1KF = vpMap1KeyFrames[bestMatch1Index];
+    //     KeyFrame *pRandSelectMap2KF = vpMap2KeyFrames[bestMatch2Index];
+
+    //     solveR = bestRotation.cast<double>();
+    //     solveT = bestTranslation.cast<double>();
+    //     solveS = (double)bestScale;
+    //     cout << "RANSAC Solve Scale: " << solveS << endl;
+    //     g2o::Sim3 gSc1c2(solveR, solveT, solveS);
+    //     g2o::Sim3 gSc1w(pRandSelectMap1KF->GetRotation().cast<double>(), pRandSelectMap1KF->GetTranslation().cast<double>(), 1.0); // g2o::Sim3: kf 1 world -> kf 1 camera
+    //     g2o::Sim3 gSc2w(pRandSelectMap2KF->GetRotation().cast<double>(), pRandSelectMap2KF->GetTranslation().cast<double>(), 1.0); // g2o::Sim3: kf 2 world -> kf 2 camera
+    //     gRANSACSw1w2 = gSc1w.inverse() * gSc1c2 * gSc2w;
+
+    //     std::chrono::steady_clock::time_point timeStartComputeInliers = std::chrono::steady_clock::now();
+
+    //     RANSACInliersRatio = Sim3Solver::ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gRANSACSw1w2);
+    //     // RANSACInliersRatio = ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gRANSACSw1w2);
+
+    //     std::chrono::steady_clock::time_point timeEndComputeInliers = std::chrono::steady_clock::now();
+    //     double time = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(timeEndComputeInliers - timeStartComputeInliers).count();
+    //     cerr << "Test: RANSAC Compute Inliers Time " << time << endl;
+    // }
+
+    cerr << "测试：Umeyama Solve Sim3 Inliers Ratio：" << umeyamaInliersRatio << endl;
+    cerr << "测试：RANSAC Solve Sim3 Inliers Ratio：" << RANSACInliersRatio << endl;
+
+    // 比较两个方法的InliersRatio，选择更好的那一个
+    float bestInliersRatio;
+    if (umeyamaInliersRatio >= RANSACInliersRatio) {
+        gSw1w2 = gUmeyamaSw1w2;
+        bestInliersRatio = umeyamaInliersRatio;
+    } else {
+        gSw1w2 = gRANSACSw1w2;
+        bestInliersRatio = RANSACInliersRatio;
+    }
+    //cerr << "测试：Inliers Ratio："<<bestInliersRatio;
+    // gSw1w2 = gUmeyamaSw1w2;
+    // gSw1w2 = gRANSACSw1w2;
+
+    // For debug
+    // Eigen::Matrix3d r = Eigen::Matrix3d::Identity();
+    // Eigen::Vector3d t(0, 0, 0);
+    // g2o::Sim3 gSc1c2(r, t, 1.0);
+
+    Eigen::Matrix<double, 7, 7> mHessian7x7;
+
+    // float numOptMatchesRatio = Optimizer::OptimizeCloudSim3(matchMap1KeyFrames, matchMap2KeyFrames, avpMatchedPoints, gSc1c2, 10, bFixedScale, mHessian7x7, true);
+
+    float numOptMatchesRatio = Optimizer::OptimizeCloudSim3(matchMap1KeyFrames, matchMap2KeyFrames, avpMatchedPoints, gSw1w2, 10, true, mHessian7x7, true);
+    cerr << "测试：优化Sim3的点匹配比例：" << numOptMatchesRatio << endl;
+    cerr << "测试：Optimize Sim3的尺度变换值：" << gSw1w2.scale() << endl;
+     timeStartComputeInliers = std::chrono::steady_clock::now();
+
+    float OptimizeInliersRatio = Sim3Solver::ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gSw1w2);
 
     //cap-udf
+    //cerr << gSw1w2 << endl;    
     pcl::PointCloud<pcl::PointXYZ>::Ptr edge_point(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_point_icp(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_point(new pcl::PointCloud<pcl::PointXYZ>);
@@ -911,8 +894,7 @@ bool CloudMerging::ComputeSubmapSim3(
     Eigen::Matrix4d transformation_matrix = Eigen::Matrix4d::Identity ();
     Eigen::Matrix4d transformation_matrix2 = Eigen::Matrix4d::Identity ();
     int iterations = 1;
-    
-    if (mbOldUdf) {
+    if(mbOldUdf) {
         std::string path_cloud = "/zclin/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz";
         get_parameter_xyz(path_cloud, *cloud_point); 
         system("rm /zclin/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz");               
@@ -920,41 +902,83 @@ bool CloudMerging::ComputeSubmapSim3(
         get_xyz(EdgeFrontMapPoint, *edge_point);
         Eigen::Quaterniond q_test = gSw1w2.rotation();
         Eigen::Matrix3d R_test = q_test.normalized().toRotationMatrix();
-        
+        //cerr << R_test;
+        //cerr << "\n" << endl; 
         Eigen::Vector3d T_test = gSw1w2.translation();
         double s_test = gSw1w2.scale();
-        
+        //cerr << s_test; 
+        //cerr << "\n" << endl;
         Eigen::Matrix3d Rs_test = R_test * s_test;
-        
+        //cerr << Rs_test;
+        //cerr << "\n" << endl;
         Eigen::Matrix4d Trans_test;
         Trans_test.setIdentity(); 
         Trans_test.block<3,3>(0,0) = Rs_test;
         Trans_test.block<3,1>(0,3) = T_test;
-        
+        //cerr << Trans_test;
+        //cerr << "\n" << endl;
         pcl::transformPointCloud (*cloud_point, *cloud_point_icp, Trans_test);        
         icp.setInputSource (cloud_point_icp);
         icp.setInputTarget (edge_point);
         do {
             icp.align (*cloud_point_icp);
             iterations ++;
-        } while (iterations < 20);
-        
+        }
+        while (iterations < 20);
         if (icp.hasConverged ()) {
             std::cout << "\nICP has converged, score is " << icp.getFitnessScore () << std::endl;
         }
         transformation_matrix = icp.getFinalTransformation ().cast<double>();
         cerr << transformation_matrix;
         cerr << "\n" << endl;        
-        
         Eigen::Matrix4d trans_out = Trans_test * transformation_matrix;
         Sophus::Sim3d qts_matrix(trans_out.cast<double>()); 
         Eigen::Matrix3d qts_R = qts_matrix.rotationMatrix();
         Eigen::Vector3d qts_T = qts_matrix.translation();
         double qts_s = qts_matrix.scale();
         gSw1w2 = g2o::Sim3(qts_R, qts_T, qts_s);
+
+        // Visualization
+        // pcl::visualization::PCLVisualizer viewer ("ICP demo");
+        // int v (1);
+        // viewer.createViewPort (0.0, 0.0, 1.0, 1.0, v);
+
+        // // The color we will be using
+        // float bckgr_gray_level = 0.0;  // Black
+        // float txt_gray_lvl = 1.0 - bckgr_gray_level;
+
+        // // Original point cloud is white
+        // pcl::visualization::PointCloudColorHandlerCustom<PointT> cloud_in_color_h (edge_point, (int) 255 * txt_gray_lvl, (int) 255 * txt_gray_lvl,(int) 255 * txt_gray_lvl); //cloud_in
+
+        // viewer.addPointCloud (edge_point, cloud_in_color_h, "cloud_in_v2", v); //cloud_in
+
+        // // ICP aligned point cloud is red
+        // pcl::visualization::PointCloudColorHandlerCustom<PointT> cloud_icp_color_h (cloud_point_icp, 180, 20, 20); //cloud_icp
+        // viewer.addPointCloud (cloud_point_icp, cloud_icp_color_h, "cloud_icp_v2", v); //cloud_icp
+
+        // viewer.addText ("White: Original point cloud\nRed: ICP aligned point cloud", 0, 15, 16, txt_gray_lvl, txt_gray_lvl, txt_gray_lvl, "icp_info_2", v);
+
+        // std::stringstream ss;
+        // ss << iterations;
+        // std::string iterations_cnt = "ICP iterations = " + ss.str ();
+        // viewer.addText (iterations_cnt, 0, 45, 16, txt_gray_lvl, txt_gray_lvl, txt_gray_lvl, "iterations_cnt", v);
+
+        // // Set background color
+        // viewer.setBackgroundColor (bckgr_gray_level, bckgr_gray_level, bckgr_gray_level, v);
+
+        // // Set camera position and orientation
+        // //viewer.setCameraPosition (-3.68332, 2.94092, 5.71266, 0.289847, 0.921947, -0.256907, 0);
+        // viewer.setCameraPosition (-3.68332, 2.94092, 5.71266, 0, 0, 0, 0);
+        // viewer.setSize (800,800);  // Visualiser window size
+
+        // // Register keyboard callback :
+        // //viewer.registerKeyboardCallback (&keyboardEventOccurred, (void*) NULL);
+
+        // viewer.spinOnce (50000);
+        // viewer.close();
     }
     
-    if (mbNewUdf) {
+    if(mbNewUdf) {
         vector<MapPoint *> CloudMapPoint = pMap2->GetAllMapPoints();
         get_xyz(CloudMapPoint, *cloud_point); 
         vector<MapPoint *> EdgeFrontMapPoint = pMap1->GetAllMapPoints();
@@ -978,15 +1002,14 @@ bool CloudMerging::ComputeSubmapSim3(
         do {
             icp.align (*cloud_point_icp);
             iterations ++;
-        } while (iterations < 20);
-        
+        }
+        while (iterations < 20);
         if (icp.hasConverged ()) {
             std::cout << "\nICP has converged, score is " << icp.getFitnessScore () << std::endl;
         }
         transformation_matrix = icp.getFinalTransformation ().cast<double>();
         cerr << transformation_matrix;
         cerr << "\n" << endl;        
-        
         Eigen::Matrix4d trans_out = Trans_test * transformation_matrix;
         Sophus::Sim3d qts_matrix(trans_out.cast<double>()); 
         Eigen::Matrix3d qts_R = qts_matrix.rotationMatrix();
@@ -995,12 +1018,14 @@ bool CloudMerging::ComputeSubmapSim3(
         gSw1w2 = g2o::Sim3(qts_R, qts_T, qts_s);
     }
 
-    if (false) {
+    if(false) {
+        //std::string path_cloud2 = "/zclin/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz";
+        //get_parameter_xyz(path_cloud2, *cloud_point2); 
+        //system("rm /zclin/Cloud-Edge-SLAM/Cloud-Edge-SLAM-master/trans_point/test2.xyz");
         vector<MapPoint *> EdgeFrontMapPoint2 = pMap1->GetAllMapPoints();
         get_xyz(EdgeFrontMapPoint2, *cloud_point2);               
         vector<MapPoint *> EdgeBackMapPoint = pMap2->GetAllMapPoints();
         get_xyz(EdgeBackMapPoint, *edge_point2);
-        
         Eigen::Quaterniond q_test2 = gSw1w2.rotation();
         Eigen::Matrix3d R_test2 = q_test2.normalized().toRotationMatrix();
         Eigen::Vector3d T_test2 = gSw1w2.translation();
@@ -1010,15 +1035,14 @@ bool CloudMerging::ComputeSubmapSim3(
         Trans_test2.setIdentity(); 
         Trans_test2.block<3,3>(0,0) = Rs_test2;
         Trans_test2.block<3,1>(0,3) = T_test2;
-        
         pcl::transformPointCloud (*edge_point2, *edge_point_icp, Trans_test2);        
         icp2.setInputSource (edge_point_icp);
         icp2.setInputTarget (cloud_point2);
         do {
             icp2.align (*edge_point_icp);
             iterations ++;
-        } while (iterations < 20);
-        
+        }
+        while (iterations < 20);
         if (icp2.hasConverged ()) {
             std::cout << "\nICP has converged, score is " << icp2.getFitnessScore () << std::endl;
         }
@@ -1030,20 +1054,30 @@ bool CloudMerging::ComputeSubmapSim3(
         double qts_s2 = qts_matrix2.scale();
         gSw1w2 = g2o::Sim3(qts_R2, qts_T2, qts_s2);
     }
+    //cap-udf
+    //OptimizeInliersRatio = Sim3Solver::ComputeInliersNum(matchMap1KeyFrames, matchMap2KeyFrames, avpValidKPMatches, gSw1w2);
 
-    std::chrono::steady_clock::time_point timeStartComputeInliers = std::chrono::steady_clock::now();
-    std::chrono::steady_clock::time_point timeEndComputeInliers = std::chrono::steady_clock::now();
+    timeEndComputeInliers = std::chrono::steady_clock::now();
     time = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(timeEndComputeInliers - timeStartComputeInliers).count();
     cerr << "Test: Optimize Compute Inliers Time " << time << endl;
 
-    // 【核心修复 2：短路特征点验证，强制释放 ICP 控制权】
-    if (mbOldUdf || mbNewUdf || mbedge_merge) {
-        cerr << "\033[1;32m[UDF BYPASS] ICP Done. Forcing Return True to execute map merge!\033[0m" << endl;
-        return true; 
-    }
-
-    if (OptimizeInliersRatio > 0.1) { 
+    if (OptimizeInliersRatio > 0.05) { // @note Todo
+                                      // if (1) { // @note 暂时不管优化结果，调试整体流程
         cerr << "测试：优化Sim3的点匹配数量是否超过阈值： true, 值为 " << OptimizeInliersRatio << endl;
+
+        /** 比较三个方法的InliersRatio，选择更好的那一个
+        float bestInliersRatio;
+        if (umeyamaInliersRatio >= RANSACInliersRatio && umeyamaInliersRatio>=OptimizeInliersRatio) {
+            bestInliersRatio = umeyamaInliersRatio;
+        } 
+        else if(umeyamaInliersRatio <= RANSACInliersRatio && RANSACInliersRatio>=OptimizeInliersRatio){
+            bestInliersRatio = RANSACInliersRatio;
+        }
+        else if(umeyamaInliersRatio <= OptimizeInliersRatio && RANSACInliersRatio<=OptimizeInliersRatio){
+            bestInliersRatio = RANSACInliersRatio;
+        }
+        cerr<<"----------------------------------------------------------------------------------------------"<<endl;
+        cerr << "测试：Inliers Ratio："<<bestInliersRatio<<endl;*/
         return true;
     } 
     else {
@@ -1055,39 +1089,64 @@ bool CloudMerging::ComputeSubmapSim3(
 }
 
 bool CloudMerging::NewDetectCommonRegions() {
-    if (!mbActiveCM) {
+    // To deactivate cloud merging. No CloudMerging  will be performed
+    if (!mbActiveCM)
         return false;
+
+    {
+        // TODO For Test
+        //        unique_lock<mutex> lock(mMutexLoopQueue);
+        //        mpCurrentKF = mlpLoopKeyFrameQueue.front();
+        //        mlpLoopKeyFrameQueue.pop_front();
+        //        // Avoid that a keyframe can be erased while it is being process by this thread
+        //        mpCurrentKF->SetNotErase();
+        //        mpCurrentKF->mbCurrentPlaceRecognition = true;
+        //
+        //        mpLastMap = mpCurrentKF->GetMap();
     }
 
-    if (mpTracker->mSensor == System::STEREO && mpLastMap->GetAllKeyFrames().size() < 5) {
+    if (mpTracker->mSensor == System::STEREO && mpLastMap->GetAllKeyFrames().size() < 5) // 12
+    {
+        // cerr << "LoopClousure: Stereo KF inserted without check: " << mpCurrentKF->mnId << endl;
         mpKeyFrameDB->add(mpCurrentKF);
         mpCurrentKF->SetErase();
         return false;
     }
 
+    // 如果当前关键帧的地图（其实也就是Active Map吧？）中关键帧数量小于12，则不进行Place Recognition
+    // 为什么呢？好像也合理，如果是Active Map内部的Loop closure，太小没有意义。如果是multi map间的子地图合并，才刚跟踪回来几帧，确实也不太可能出现回到旧的地方的情况，不过这个可能性还是有的，如果遇到这种相关的离奇的情况，需要记得这个地方。@note warnings
     if (mpLastMap->GetAllKeyFrames().size() < 12) {
+        // cerr << "LoopClousure: Stereo KF inserted without check, map is small: " << mpCurrentKF->mnId << endl;
         mpKeyFrameDB->add(mpCurrentKF);
         mpCurrentKF->SetErase();
         return false;
     }
 
+    // cerr << "LoopClousure: Checking KF: " << mpCurrentKF->mnId << endl;
+
+    // Check the last candidates with geometric validation
+    //  Loop candidates
     bool bLoopDetectedInKF = false;
     bool bCheckSpatial = false;
 
+    // ***************** 第三步（Map Merge），当上一个关键帧有匹配Place Recognition成功的迹象，这一帧进行确认检查 *****************
+    // Merge candidates
     bool bMergeDetectedInKF = false;
     if (mnMergeNumCoincidences > 0) {
+        // Find from the last KF candidates
+        // 上一帧camera坐标系 -> 当前帧camera坐标系
         Sophus::SE3d mTcl = (mpCurrentKF->GetPose() * mpMergeLastCurrentKF->GetPoseInverse()).cast<double>();
         g2o::Sim3 gScl(mTcl.unit_quaternion(), mTcl.translation(), 1.0);
 
         g2o::Sim3 gScw = gScl * mg2oMergeSlw;
         int numProjMatches = 0;
         vector<MapPoint *> vpMatchedMPs;
-        
+        // mpLoopMatchedKF是第二步中从候选关键帧选择的最佳匹配关键帧，这里直接用新一个关键帧与其进行匹配，用于进一步地保证Place Recognition的Precision
         bool bCommonRegion = DetectAndReffineSim3FromLastKF(mpCurrentKF, mpMergeMatchedKF, gScw, numProjMatches, mvpMergeMPs, vpMatchedMPs);
         if (bCommonRegion) {
             bMergeDetectedInKF = true;
 
-            mnMergeNumCoincidences++; 
+            mnMergeNumCoincidences++; // 若新一关键帧也匹配成功，则计数+1
             mpMergeLastCurrentKF->SetErase();
             mpMergeLastCurrentKF = mpCurrentKF;
             mg2oMergeSlw = gScw;
@@ -1099,7 +1158,9 @@ bool CloudMerging::NewDetectCommonRegions() {
             bMergeDetectedInKF = false;
 
             mnMergeNumNotFound++;
+            // ***************** 若第一次成功后，再连续两个关键帧丢失（失败）两次，则重置整次Place Recognition进程 *****************
             if (mnMergeNumNotFound >= 2) {
+                // ***************** 可以在这里看到Place Recognition关键的变量 *****************
                 mpMergeLastCurrentKF->SetErase();
                 mpMergeMatchedKF->SetErase();
                 mnMergeNumCoincidences = 0;
@@ -1110,18 +1171,26 @@ bool CloudMerging::NewDetectCommonRegions() {
         }
     }
 
+    // ***************** 第五步，若Loop closure或是Map Merge的Place Recognition检测成功，返回true *****************
     if (mbMergeDetected) {
         mpKeyFrameDB->add(mpCurrentKF);
         return true;
     }
 
+    // TODO: This is only necessary if we use a minimun score for pick the best candidates
     const vector<KeyFrame *> vpConnectedKeyFrames = mpCurrentKF->GetVectorCovisibleKeyFrames();
 
+    // Extract candidates from the bag of words
     vector<KeyFrame *> vpMergeBowCand, vpLoopBowCand;
     if (!bMergeDetectedInKF || !bLoopDetectedInKF) {
+        // Search in BoW
+        // ***************** 第一步，从BoW中检测出候选帧，默认选择3个最好的候选帧 *****************
+        // 3个Active Map内的最优候选帧，3个Multi Map内的最优候选帧
         mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand, 3);
     }
 
+    // Check the BoW candidates if the geometric candidate list is empty
+    // ***************** 第二步，BoW得到候选之后，从候选中尝试选择最终的结果 *****************
     if (!bMergeDetectedInKF && !vpMergeBowCand.empty()) {
         mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs);
     }
@@ -1148,17 +1217,18 @@ bool CloudMerging::DetectAndReffineSim3FromLastKF(KeyFrame *pCurrentKF, KeyFrame
     int nProjMatchesRep = 100;
 
     if (nNumProjMatches >= nProjMatches) {
+        // Verbose::PrintMess("Sim3 reffine: There are " + to_string(nNumProjMatches) + " initial matches ", Verbose::VERBOSITY_DEBUG);
         Sophus::SE3d mTwm = pMatchedKF->GetPoseInverse().cast<double>();
         g2o::Sim3 gSwm(mTwm.unit_quaternion(), mTwm.translation(), 1.0);
         g2o::Sim3 gScm = gScw * gSwm;
         Eigen::Matrix<double, 7, 7> mHessian7x7;
 
-        bool bFixedScale = mbFixScale; 
-        if (mpTracker->mSensor == System::IMU_MONOCULAR && !pCurrentKF->GetMap()->GetIniertialBA2()) {
+        bool bFixedScale = mbFixScale; // TODO CHECK; Solo para el monocular inertial
+        if (mpTracker->mSensor == System::IMU_MONOCULAR && !pCurrentKF->GetMap()->GetIniertialBA2())
             bFixedScale = false;
-        }
-            
         int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pMatchedKF, vpMatchedMPs, gScm, 10, bFixedScale, mHessian7x7, true);
+
+        // Verbose::PrintMess("Sim3 reffine: There are " + to_string(numOptMatches) + " matches after of the optimization ", Verbose::VERBOSITY_DEBUG);
 
         if (numOptMatches > nProjOptMatches) {
             g2o::Sim3 gScw_estimation(gScw.rotation(), gScw.translation(), 1.0);
@@ -1184,6 +1254,7 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
     int nProjMatches = 50;
     int nProjOptMatches = 80;
 
+    // spConnectedKeyFrames代表当前关键帧所有有共视的关键帧
     set<KeyFrame *> spConnectedKeyFrames = mpCurrentKF->GetConnectedKeyFrames();
 
     int nNumCovisibles = 10;
@@ -1191,8 +1262,11 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
     ORBmatcher matcherBoW(0.9, true);
     ORBmatcher matcher(0.75, true);
 
+    // Varibles to select the best numbe
     KeyFrame *pBestMatchedKF;
+    // ***************** nBestMatchesReproj：遍历候选关键帧时，记录最终匹配最好的候选关键帧所匹配的Map Points数量，遍历结束后即可直接用它作为判定依据，判定是否达到了我们希望达到的数量，达到了则成功进行了一次Place Recognition *****************
     int nBestMatchesReproj = 0;
+    // ***************** nBestNumCoindicendes：遍历候选关键帧时，记录最终匹配最好的候选关键帧 与 当前关键帧共视的10个关键帧中有多少个匹配成功了，例如3个匹配成功了，则3/10，遍历结束后即可直接用它作为判定依据，判定是否达到了我们希望达到的数量，达到了则成功进行了一次Place Recognition *****************
     int nBestNumCoindicendes = 0;
     g2o::Sim3 g2oBestScw;
     std::vector<MapPoint *> vpBestMapPoints;
@@ -1203,78 +1277,95 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
     vector<int> vnMatchesStage(numCandidates, 0);
 
     int index = 0;
-    
+    // Verbose::PrintMess("BoW candidates: There are " + to_string(vpBowCand.size()) + " possible candidates ", Verbose::VERBOSITY_DEBUG);
+    // ***************** 遍历每个候选关键帧 开始 *****************
+    // ***************** 在下列的循环中，操作对象都是 当前关键帧 + 当前遍历到的第i个候选关键帧 *****************
     for (KeyFrame *pKFi : vpBowCand) {
-        if (!pKFi || pKFi->isBad()) {
+        if (!pKFi || pKFi->isBad())
             continue;
-        }
 
+        // std::cerr << "KF candidate: " << pKFi->mnId << std::endl;
+        // Current KF against KF with covisibles version
+        // 取nNumCovisibles个最近的共视帧
         std::vector<KeyFrame *> vpCovKFi = pKFi->GetBestCovisibilityKeyFrames(nNumCovisibles);
         if (vpCovKFi.empty()) {
             std::cerr << "Covisible list empty" << std::endl;
             vpCovKFi.push_back(pKFi);
         } else {
+            // 将Matched KF也放入列表内
             vpCovKFi.push_back(vpCovKFi[0]);
             vpCovKFi[0] = pKFi;
         }
 
         bool bAbortByNearKF = false;
         for (int j = 0; j < vpCovKFi.size(); ++j) {
+            // 这样find == end代表没有找到，而不是指向最后一个元素
+            // 如果有找到，说明找到的 候选关键帧+其最近的10个关键帧 存在与当前关键帧比较近的，不满足Loop closure或者Map merge的需求
             if (spConnectedKeyFrames.find(vpCovKFi[j]) != spConnectedKeyFrames.end()) {
                 bAbortByNearKF = true;
                 break;
             }
         }
         if (bAbortByNearKF) {
+            // std::cerr << "Check BoW aborted because is close to the matched one " << std::endl;
             continue;
         }
+        // std::cerr << "Check BoW continue because is far to the matched one " << std::endl;
 
         std::vector<std::vector<MapPoint *>> vvpMatchedMPs;
         vvpMatchedMPs.resize(vpCovKFi.size());
         std::set<MapPoint *> spMatchedMPi;
         int numBoWMatches = 0;
 
+        // ***************** pMostBoWMatchesKF就是当前遍历的 候选关键帧 *****************
         KeyFrame *pMostBoWMatchesKF = pKFi;
         int nMostBoWNumMatches = 0;
 
+        // 好奇怪的size
         std::vector<MapPoint *> vpMatchedPoints = std::vector<MapPoint *>(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint *>(NULL));
         std::vector<KeyFrame *> vpKeyFrameMatchedMP = std::vector<KeyFrame *>(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame *>(NULL));
 
         int nIndexMostBoWMatchesKF = 0;
         for (int j = 0; j < vpCovKFi.size(); ++j) {
-            if (!vpCovKFi[j] || vpCovKFi[j]->isBad()) {
+            if (!vpCovKFi[j] || vpCovKFi[j]->isBad())
                 continue;
-            }
 
+            // 使用BoW匹配，获得当前关键帧 与 候选关键帧+其最近的10个关键帧 的MapPoints匹配
             int num = matcherBoW.SearchByBoW(mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j]);
             if (num > nMostBoWNumMatches) {
+                // 记录BoW匹配最多的关键帧
                 nMostBoWNumMatches = num;
                 nIndexMostBoWMatchesKF = j;
             }
         }
 
         for (int j = 0; j < vpCovKFi.size(); ++j) {
-            for (int k = 0; k < vvpMatchedMPs[j].size(); ++k) {
+            for (int k = 0; k < vvpMatchedMPs[j].size(); ++k) // 遍历匹配上的每个Map Point
+            {
                 MapPoint *pMPi_j = vvpMatchedMPs[j][k];
-                if (!pMPi_j || pMPi_j->isBad()) {
+                if (!pMPi_j || pMPi_j->isBad())
                     continue;
-                }
 
-                if (spMatchedMPi.find(pMPi_j) == spMatchedMPi.end()) {
+                if (spMatchedMPi.find(pMPi_j) == spMatchedMPi.end()) // 保存所有匹配上的Map Point到set
+                {
                     spMatchedMPi.insert(pMPi_j);
                     numBoWMatches++;
 
-                    vpMatchedPoints[k] = pMPi_j;          
-                    vpKeyFrameMatchedMP[k] = vpCovKFi[j]; 
+                    vpMatchedPoints[k] = pMPi_j;          // 这里不是有可能覆盖吗？
+                    vpKeyFrameMatchedMP[k] = vpCovKFi[j]; //
                 }
             }
         }
 
-        if (numBoWMatches >= nBoWMatches) {
+        // pMostBoWMatchesKF = vpCovKFi[pMostBoWMatchesKF];  // 貌似作者本身还想要根据前面计算的情况修改最匹配的关键帧为当前遍历的候选关键帧中的共视关键帧之一
+
+        if (numBoWMatches >= nBoWMatches) // TODO pick a good threshold
+        {
+            // Geometric validation
             bool bFixedScale = mbFixScale;
 
             Sim3Solver solver = Sim3Solver(mpCurrentKF, pMostBoWMatchesKF, vpMatchedPoints, bFixedScale, vpKeyFrameMatchedMP);
-            solver.SetRansacParameters(0.99, nBoWInliers, 300); 
+            solver.SetRansacParameters(0.99, nBoWInliers, 300); // at least 15 inliers
 
             bool bNoMore = false;
             vector<bool> vbInliers;
@@ -1282,23 +1373,30 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
             bool bConverge = false;
             Eigen::Matrix4f mTcm;
             while (!bConverge && !bNoMore) {
+                // ***************** 根据初步得到的Map Points匹配求解Sim3 *****************
                 mTcm = solver.iterate(20, bNoMore, vbInliers, nInliers, bConverge);
+                // Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
             }
 
             if (bConverge) {
+                // std::cerr << "Check BoW: SolverSim3 converged" << std::endl;
+
+                // Verbose::PrintMess("BoW guess: Convergende with " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
+                //  Match by reprojection
                 vpCovKFi.clear();
                 vpCovKFi = pMostBoWMatchesKF->GetBestCovisibilityKeyFrames(nNumCovisibles);
                 vpCovKFi.push_back(pMostBoWMatchesKF);
                 set<KeyFrame *> spCheckKFs(vpCovKFi.begin(), vpCovKFi.end());
+
+                // std::cerr << "There are " << vpCovKFi.size() <<" near KFs" << std::endl;
 
                 set<MapPoint *> spMapPoints;
                 vector<MapPoint *> vpMapPoints;
                 vector<KeyFrame *> vpKeyFrames;
                 for (KeyFrame *pCovKFi : vpCovKFi) {
                     for (MapPoint *pCovMPij : pCovKFi->GetMapPointMatches()) {
-                        if (!pCovMPij || pCovMPij->isBad()) {
+                        if (!pCovMPij || pCovMPij->isBad())
                             continue;
-                        }
 
                         if (spMapPoints.find(pCovMPij) == spMapPoints.end()) {
                             spMapPoints.insert(pCovMPij);
@@ -1308,36 +1406,40 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
                     }
                 }
 
+                // std::cerr << "There are " << vpKeyFrames.size() <<" KFs which view all the mappoints" << std::endl;
+
                 g2o::Sim3 gScm(solver.GetEstimatedRotation().cast<double>(), solver.GetEstimatedTranslation().cast<double>(), (double)solver.GetEstimatedScale());
                 g2o::Sim3 gSmw(pMostBoWMatchesKF->GetRotation().cast<double>(), pMostBoWMatchesKF->GetTranslation().cast<double>(), 1.0);
-                g2o::Sim3 gScw = gScm * gSmw; 
+                g2o::Sim3 gScw = gScm * gSmw; // Similarity matrix of current from the world position
                 Sophus::Sim3f mScw = Converter::toSophus(gScw);
 
                 vector<MapPoint *> vpMatchedMP;
                 vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint *>(NULL));
                 vector<KeyFrame *> vpMatchedKF;
                 vpMatchedKF.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<KeyFrame *>(NULL));
-                
+                // ***************** 根据求解好的Sim3，再根据投影寻找优化的Map Points匹配 *****************
                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
+                // cerr <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
 
                 if (numProjMatches >= nProjMatches) {
+                    // Optimize Sim3 transformation with every matches
                     Eigen::Matrix<double, 7, 7> mHessian7x7;
 
                     bool bFixedScale = mbFixScale;
-                    if (mpTracker->mSensor == System::IMU_MONOCULAR && !mpCurrentKF->GetMap()->GetIniertialBA2()) {
+                    if (mpTracker->mSensor == System::IMU_MONOCULAR && !mpCurrentKF->GetMap()->GetIniertialBA2())
                         bFixedScale = false;
-                    }
 
+                    // ***************** 根据投影优化后的Map Points进行约束优化 *****************
                     int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pKFi, vpMatchedMP, gScm, 10, mbFixScale, mHessian7x7, true);
 
                     if (numOptMatches >= nSim3Inliers) {
                         g2o::Sim3 gSmw(pMostBoWMatchesKF->GetRotation().cast<double>(), pMostBoWMatchesKF->GetTranslation().cast<double>(), 1.0);
-                        g2o::Sim3 gScw = gScm * gSmw; 
+                        g2o::Sim3 gScw = gScm * gSmw; // Similarity matrix of current from the world position
                         Sophus::Sim3f mScw = Converter::toSophus(gScw);
 
                         vector<MapPoint *> vpMatchedMP;
                         vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint *>(NULL));
-                        
+                        // ***************** 约束优化后，再进行一次根据投影寻找优化的Map Points匹配 *****************
                         int numProjOptMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpMatchedMP, 5, 1.0);
 
                         if (numProjOptMatches >= nProjOptMatches) {
@@ -1369,18 +1471,22 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
                             }
 
                             int nNumKFs = 0;
-                            
+                            // vpMatchedMPs = vpMatchedMP;
+                            // vpMPs = vpMapPoints;
+                            //  Check the Sim3 transformation with the current KeyFrame covisibles
+                            //  ***************** 取当前关键帧最共视的10个关键帧 *****************
                             vector<KeyFrame *> vpCurrentCovKFs = mpCurrentKF->GetBestCovisibilityKeyFrames(nNumCovisibles);
 
                             int j = 0;
-                            while (nNumKFs < 3 && j < vpCurrentCovKFs.size()) {
+                            while (nNumKFs < 3 && j < vpCurrentCovKFs.size()) // 判定 当前关键帧 最共视的10个关键帧是否和pMostBoWMatchesKF(即当前遍历的候选关键帧)关键帧存在足够多的匹配，提升Place Recognition的Precision
+                            {
                                 KeyFrame *pKFj = vpCurrentCovKFs[j];
                                 Sophus::SE3d mTjc = (pKFj->GetPose() * mpCurrentKF->GetPoseInverse()).cast<double>();
                                 g2o::Sim3 gSjc(mTjc.unit_quaternion(), mTjc.translation(), 1.0);
                                 g2o::Sim3 gSjw = gSjc * gScw;
                                 int numProjMatches_j = 0;
                                 vector<MapPoint *> vpMatchedMPs_j;
-                                
+                                // ***************** 进行判定 *****************
                                 bool bValid = DetectCommonRegionsFromLastKF(pKFj, pMostBoWMatchesKF, gSjw, numProjMatches_j, vpMapPoints, vpMatchedMPs_j);
 
                                 if (bValid) {
@@ -1403,7 +1509,7 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
                                 nBestNumCoindicendes = nNumKFs;
                                 pBestMatchedKF = pMostBoWMatchesKF;
                                 g2oBestScw = gScw;
-                                
+                                // ***************** 两个关键的结果变量 *****************
                                 vpBestMapPoints = vpMapPoints;
                                 vpBestMatchedMapPoints = vpMatchedMP;
                             }
@@ -1411,21 +1517,32 @@ bool CloudMerging::DetectCommonRegionsFromBoW(std::vector<KeyFrame *> &vpBowCand
                     }
                 }
             }
+            /*else
+            {
+                Verbose::PrintMess("BoW candidate: it don't match with the current one", Verbose::VERBOSITY_DEBUG);
+            }*/
         }
         index++;
     }
-    
-    if (nBestMatchesReproj > 0) {
+    // ***************** 遍历每个候选关键帧 结束 *****************
+
+    if (nBestMatchesReproj > 0) // 不使用这个最佳匹配Map Point数量判定依据，只要有匹配就认为成功
+    {
         pLastCurrentKF = mpCurrentKF;
         nNumCoincidences = nBestNumCoindicendes;
-        
+        // ***************** 关键的结果变量 *****************
+        // pMatchedKF2：对应Loop closing类中的mpLoopMatchedKF，用于记录当前关键帧的最佳匹配关键帧
         pMatchedKF2 = pBestMatchedKF;
         pMatchedKF2->SetNotErase();
-        g2oScw = g2oBestScw; 
-        
+        g2oScw = g2oBestScw; // mg2oMergeSlw
+        // ***************** 两个关键的结果变量 *****************
+        // vpMapPoints：保存了所有 候选关键帧+其共视帧 的Map Points
+        // vpMatchedMP：保存了当前关键帧的Map Points匹配的Map Points，大小固定，无匹配的元素则为NULL
+        // 按理说所有vpMatchedMP中匹配的Map Points都可以在vpMapPoints中找到
         vpMPs = vpBestMapPoints;
         vpMatchedMPs = vpBestMatchedMapPoints;
 
+        // ***************** 使用nNumCoincidences判定依据，由于选取当前关键帧最共视关键帧的数量(nNumCovisibles)为10，因此这里对应当达到3/10时就认为Place Recognition成功 *****************
         return nNumCoincidences >= 3;
     } else {
         int maxStage = -1;
@@ -1462,7 +1579,6 @@ int CloudMerging::FindMatchesByProjection(KeyFrame *pCurrentKF, KeyFrame *pMatch
     vpCovKFm.push_back(pMatchedKFw);
     set<KeyFrame *> spCheckKFs(vpCovKFm.begin(), vpCovKFm.end());
     set<KeyFrame *> spCurrentCovisbles = pCurrentKF->GetConnectedKeyFrames();
-    
     if (nInitialCov < nNumCovisibles) {
         for (int i = 0; i < nInitialCov; ++i) {
             vector<KeyFrame *> vpKFs = vpCovKFm[i]->GetBestCovisibilityKeyFrames(nNumCovisibles);
@@ -1483,9 +1599,8 @@ int CloudMerging::FindMatchesByProjection(KeyFrame *pCurrentKF, KeyFrame *pMatch
     vpMatchedMapPoints.clear();
     for (KeyFrame *pKFi : vpCovKFm) {
         for (MapPoint *pMPij : pKFi->GetMapPointMatches()) {
-            if (!pMPij || pMPij->isBad()) {
+            if (!pMPij || pMPij->isBad())
                 continue;
-            }
 
             if (spMapPoints.find(pMPij) == spMapPoints.end()) {
                 spMapPoints.insert(pMPij);
@@ -1511,13 +1626,12 @@ int CloudMerging::FindMatchesByProjection(KeyFrame *pCurrentKF, KeyFrame *pMatch
  * @param [in] blockLocalMapper  是否暂停Local Mapper，如果是EdgeFront 和 Cloud，不涉及当前运行的Map，就不需要暂停
  */
 void CloudMerging::CloudMergeMap(
-    Map *pMainMap, Map *pMergedMap,  
+    Map *pMainMap, Map *pMergedMap,  //mainmap为frontmap，mergemap为cloudmap
     g2o::Sim3 gSwMainMerged,
     const std::map<int, int> &pMainMergedKeyFrameMatch,
     std::map<KeyFrame *, std::vector<std::pair<int, int>>> &vpMainMergedMapPointsMatch,
-    LocalMapping *pLocalMapper, bool blockLocalMapper,
-    bool bOldUdf, bool bNewUdf) {
-    
+    LocalMapping *pLocalMapper, bool blockLocalMapper) {
+    // 抽取用于求解Sim3的支点关键帧
     const vector<KeyFrame *> &vpMainMapKeyFrames = pMainMap->GetAllKeyFrames();
     const vector<KeyFrame *> &vpMergedMapKeyFrames = pMergedMap->GetAllKeyFrames();
     auto iter = pMainMergedKeyFrameMatch.begin();
@@ -1525,27 +1639,38 @@ void CloudMerging::CloudMergeMap(
     KeyFrame *pRandMainKF = vpMainMapKeyFrames[iter->first];
     KeyFrame *pRandMergedKF = vpMergedMapKeyFrames[iter->second];
 
-    Sophus::SE3d mTCameraMergedWorld = pRandMergedKF->GetPose().cast<double>(); 
-    g2o::Sim3 gSCameraMergedWorld(mTCameraMergedWorld.unit_quaternion(), mTCameraMergedWorld.translation(), 1.0); 
-    g2o::Sim3 gSMergedCameraMainWorld = gSCameraMergedWorld * gSwMainMerged.inverse(); 
+    // init Sim3
+    Sophus::SE3d mTCameraMergedWorld = pRandMergedKF->GetPose().cast<double>(); // 取出当前关键帧的位姿？
+    g2o::Sim3 gSCameraMergedWorld(mTCameraMergedWorld.unit_quaternion(), mTCameraMergedWorld.translation(), 1.0); //拼接成sim3矩阵，四元数+t+s
+    g2o::Sim3 gSMergedCameraMainWorld = gSCameraMergedWorld * gSwMainMerged.inverse(); //得到最终的变换矩阵
 
     if (blockLocalMapper) {
+        // ***************** 准备工作：因为需要处理Map，暂停Local Mapping线程，Local Mapping线程将会在处理完正在执行的那次循环后暂停 *****************
         pLocalMapper->RequestStop();
-        while (!pLocalMapper->isStopped()) {
+        // Wait until Local Mapping has effectively stopped
+        while (!pLocalMapper->isStopped()) // 等待Local Mapping线程处理完正在执行的那次循环
+        {
             usleep(1000);
         }
+        // cerr << "Local Map stopped" << endl;
 
-        pLocalMapper->EmptyQueue(); 
+        pLocalMapper->EmptyQueue(); // 将队列中的关键帧全部添加到局部地图中，但不进行Local Mapping操作
     }
 
+    // ***************** 开始工作 *****************
+    // Ensure current keyframe is updated
     pRandMergedKF->UpdateConnections();
 
+    // spLocalWindowKFs：保存Welding Windows中Active Map部分的所有关键帧
+    // spLocalWindowMPs：保存Welding Windows中Active Map部分相关的所有地图点
     set<KeyFrame *> spMergedMapWindowKFs;
-    set<MapPoint *> spMergedMapWindowMPs; 
+    set<MapPoint *> spMergedMapWindowMPs; //云点
 
     set<KeyFrame *> spMainMapWindowKFs;
-    set<MapPoint *> spMainMapWindowMPs; 
+    set<MapPoint *> spMainMapWindowMPs; //边点
 
+    // ****** 构建Welding Window ******
+    // 添加所有match的KF到welding window，并添加所有match KF各自的5个最佳公视帧
     int numTemporalKFs = 5;
     for (iter = pMainMergedKeyFrameMatch.begin(); iter != pMainMergedKeyFrameMatch.end(); iter++) {
         KeyFrame *pCurMainKF = vpMainMapKeyFrames[iter->first];
@@ -1560,83 +1685,89 @@ void CloudMerging::CloudMergeMap(
         spMainMapWindowKFs.insert(vpCurMainCovisibleKFs.begin(), vpCurMainCovisibleKFs.end());
     }
 
-    for (KeyFrame *pKFi : spMergedMapWindowKFs) { 
-        if (!pKFi || pKFi->isBad()) {
+    // 添加所有看到的Map point
+    for (KeyFrame *pKFi : spMergedMapWindowKFs) { //添加云点，这些点是来自spMergedMapWindowKFs 
+        if (!pKFi || pKFi->isBad())
             continue;
-        }
 
-        set<MapPoint *> spMPs = pKFi->GetMapPoints(); 
-        spMergedMapWindowMPs.insert(spMPs.begin(), spMPs.end()); 
+        set<MapPoint *> spMPs = pKFi->GetMapPoints(); //获取关键帧对应的地图点
+        spMergedMapWindowMPs.insert(spMPs.begin(), spMPs.end()); //将单帧点云输送给WindowMps
     }
 
     for (KeyFrame *pKFi : spMainMapWindowKFs) {
-        if (!pKFi || pKFi->isBad()) {
+        if (!pKFi || pKFi->isBad())
             continue;
-        }
 
         set<MapPoint *> vpMPs = pKFi->GetMapPoints();
         spMainMapWindowMPs.insert(vpMPs.begin(), vpMPs.end());
     }
 
+    // 手动为两边match的keypoints对应的mappoints添加observations
     int nAddObservation = 0;
-    
-    // 【核心修复 1：UDF 旁路假视觉约束】使用参数 bOldUdf 和 bNewUdf
-    if (!bOldUdf && !bNewUdf) {
-        for (iter = pMainMergedKeyFrameMatch.begin(); iter != pMainMergedKeyFrameMatch.end(); iter++) {
-            KeyFrame *pCurMainKF = vpMainMapKeyFrames[iter->first];
-            KeyFrame *pCurMergedKF = vpMergedMapKeyFrames[iter->second];
+    for (iter = pMainMergedKeyFrameMatch.begin(); iter != pMainMergedKeyFrameMatch.end(); iter++) {
+        KeyFrame *pCurMainKF = vpMainMapKeyFrames[iter->first];
+        KeyFrame *pCurMergedKF = vpMergedMapKeyFrames[iter->second];
 
-            if (!(vpMainMergedMapPointsMatch.count(pCurMainKF))) {
-                cerr << "Error! " << endl;
-                exit(200000);
+        if (!(vpMainMergedMapPointsMatch.count(pCurMainKF))) {
+            cerr << "Error! " << endl;
+            exit(200000);
+        }
+        std::vector<std::pair<int, int>> vpMapPointsMatch = vpMainMergedMapPointsMatch[pCurMainKF];
+        for (auto &iter : vpMapPointsMatch) {
+            MapPoint *pCurMainMP = pCurMainKF->GetMapPoint(iter.first);
+            MapPoint *pCurMergedMP = pCurMergedKF->GetMapPoint(iter.second);
+            if (pCurMainMP && !pCurMainMP->isBad()) {
+                pCurMainMP->AddObservation(pCurMergedKF, iter.second);
+                nAddObservation++;
             }
-            std::vector<std::pair<int, int>> vpMapPointsMatch = vpMainMergedMapPointsMatch[pCurMainKF];
-            for (auto &iter_match : vpMapPointsMatch) {
-                MapPoint *pCurMainMP = pCurMainKF->GetMapPoint(iter_match.first);
-                MapPoint *pCurMergedMP = pCurMergedKF->GetMapPoint(iter_match.second);
-                if (pCurMainMP && !pCurMainMP->isBad()) {
-                    pCurMainMP->AddObservation(pCurMergedKF, iter_match.second);
-                    nAddObservation++;
-                }
-                if (pCurMergedMP && !pCurMergedMP->isBad()) {
-                    pCurMergedMP->AddObservation(pCurMainKF, iter_match.first);
-                    nAddObservation++;
-                }
+            if (pCurMergedMP && !pCurMergedMP->isBad()) {
+                pCurMergedMP->AddObservation(pCurMainKF, iter.first);
+                nAddObservation++;
             }
         }
-    } else {
-        cerr << "\033[1;32m[UDF BYPASS] Skipping cross-map visual observations.\033[0m" << endl;
     }
     cerr << "Test: Add observation num: " << nAddObservation << endl;
 
+    // 原来的SearchAndFuse是有添加observations功能的，但因为我们CloudMap没有描述子，因此不用它
+    // vector<MapPoint *> vpCheckFuseMapPoint;
+    // vpCheckFuseMapPoint.reserve(spMainMapWindowMPs.size());
+    // std::copy(spMainMapWindowMPs.begin(), spMainMapWindowMPs.end(), std::back_inserter(vpCheckFuseMapPoint));
+
+    // 取出Place Recognition中得到的两个关键帧之间的Sim3相似变化
     Sophus::SE3d Twc = pRandMergedKF->GetPoseInverse().cast<double>();
     g2o::Sim3 g2oNonCorrectedSwc(Twc.unit_quaternion(), Twc.translation(), 1.0);
     g2o::Sim3 g2oNonCorrectedScw = g2oNonCorrectedSwc.inverse();
-    g2o::Sim3 g2oCorrectedScw = gSMergedCameraMainWorld; 
+    // Main World->Merged Camera
+    g2o::Sim3 g2oCorrectedScw = gSMergedCameraMainWorld; // TODO Check the transformation 最终变换阵
 
+    // vCorrectedSim3：保存所有 当前关键帧+其共视关键帧 转到合并地图的Sim3变换
+    // vNonCorrectedSim3：保存所有 当前关键帧+其共视关键帧 自己地图内的Sim3变换（只是将原先有的SE3转为Sim3而已）
     KeyFrameAndPose vCorrectedSim3, vNonCorrectedSim3;
-    vCorrectedSim3[pRandMergedKF] = g2oCorrectedScw; 
+    vCorrectedSim3[pRandMergedKF] = g2oCorrectedScw; //转到合并地图的Sim3变换
     vNonCorrectedSim3[pRandMergedKF] = g2oNonCorrectedScw;
 
-    for (KeyFrame *pKFi : spMergedMapWindowKFs) {
+    for (KeyFrame *pKFi : spMergedMapWindowKFs) // 遍历spLocalWindowKFs
+    {
         if (!pKFi || pKFi->isBad()) {
             Verbose::PrintMess("Bad KF in correction", Verbose::VERBOSITY_DEBUG);
             continue;
         }
 
-        if (pKFi->GetMap() != pMergedMap) {
+        if (pKFi->GetMap() != pMergedMap) // 这种情况也可能发生吗？？
             Verbose::PrintMess("Other map KF, this should't happen", Verbose::VERBOSITY_DEBUG);
-        }
 
         g2o::Sim3 g2oCorrectedSiw;
 
+        // 根据两个关键帧已知的Sim3变换，计算其他共视关键帧的Sim3变换（SE3 + Sim3）
         if (pKFi != pRandMergedKF) {
             Sophus::SE3d Tiw = (pKFi->GetPose()).cast<double>();
             g2o::Sim3 g2oSiw(Tiw.unit_quaternion(), Tiw.translation(), 1.0);
+            // Pose without correction
             vNonCorrectedSim3[pKFi] = g2oSiw;
 
-            Sophus::SE3d Tic = Tiw * Twc;                                    
-            g2o::Sim3 g2oSic(Tic.unit_quaternion(), Tic.translation(), 1.0); 
+            Sophus::SE3d Tic = Tiw * Twc;                                    // 计算
+            g2o::Sim3 g2oSic(Tic.unit_quaternion(), Tic.translation(), 1.0); // SE3转换为Sim3
+            // 匹配世界->共视关键帧
             g2oCorrectedSiw = g2oSic * gSMergedCameraMainWorld;
             vCorrectedSim3[pKFi] = g2oCorrectedSiw;
         } else {
@@ -1644,17 +1775,25 @@ void CloudMerging::CloudMergeMap(
         }
         pKFi->mTcwMerge = pKFi->GetPose();
 
+        // Update keyframe pose with corrected Sim3. First transform Sim3 to SE3 (scale translation)
         double s = g2oCorrectedSiw.scale();
+        // pKFi->mfScale保存关键帧变换的尺度
         pKFi->mfScale = s;
         Sophus::SE3d correctedTiw(g2oCorrectedSiw.rotation(), g2oCorrectedSiw.translation() / s);
+        // pKFi->mTcwMerge保存关键帧变换的SE3
         pKFi->mTcwMerge = correctedTiw.cast<float>();
+
+        // TODO DEBUG to know which are the KFs that had been moved to the other map
     }
 
+    // 地图点在Merge Map中的坐标值
     int numPointsWithCorrection = 0;
 
+    // for(MapPoint* pMPi : spLocalWindowMPs)
     set<MapPoint *>::iterator itMP = spMergedMapWindowMPs.begin();
     while (itMP != spMergedMapWindowMPs.end()) {
         MapPoint *pMPi = *itMP;
+        // 删除坏点
         if (!pMPi || pMPi->isBad()) {
             itMP = spMergedMapWindowMPs.erase(itMP);
             continue;
@@ -1669,61 +1808,86 @@ void CloudMerging::CloudMergeMap(
         g2o::Sim3 g2oCorrectedSwi = vCorrectedSim3[pKFref].inverse();
         g2o::Sim3 g2oNonCorrectedSiw = vNonCorrectedSim3[pKFref];
 
+        // Project with non-corrected pose and project back with corrected pose
         Eigen::Vector3d P3Dw = pMPi->GetWorldPos().cast<double>();
         Eigen::Vector3d eigCorrectedP3Dw = g2oCorrectedSwi.map(g2oNonCorrectedSiw.map(P3Dw));
         Eigen::Quaterniond Rcor = g2oCorrectedSwi.rotation() * g2oNonCorrectedSiw.rotation();
 
-        pMPi->mPosMerge = eigCorrectedP3Dw.cast<float>(); 
-        pMPi->mNormalVectorMerge = Rcor.cast<float>() * pMPi->GetNormal(); 
+        // 结果保存至Map Point内部的成员变量
+        pMPi->mPosMerge = eigCorrectedP3Dw.cast<float>(); //用于更新点的位姿
+        pMPi->mNormalVectorMerge = Rcor.cast<float>() * pMPi->GetNormal(); //
         itMP++;
     }
 
+    // ***************** 迁移关键帧和Map Point，根据Active Map中关键帧和Map Point计算好的Merge Map坐标系下的Pose、坐标，进行迁移 *****************
     {
-        unique_lock<mutex> currentLock(pMergedMap->mMutexMapUpdate); 
-        unique_lock<mutex> mergeLock(pMainMap->mMutexMapUpdate);     
+        // 这里不加锁也没事吧，Map线程已经Stop了：No! 不加锁有事，Tracking线程会使用这个锁，必须暂停Tracking线程
+        unique_lock<mutex> currentLock(pMergedMap->mMutexMapUpdate); // We update the current map with the Merge information
+        unique_lock<mutex> mergeLock(pMainMap->mMutexMapUpdate);     // We remove the Kfs and MPs in the merged area from the old map
 
+        // std::cerr << "Merge local window: " << spLocalWindowKFs.size() << std::endl;
+        // std::cerr << "[Merge]: init merging maps " << std::endl;
+
+        // 更新Active Map中Welding window中的关键帧
         for (KeyFrame *pKFi : spMergedMapWindowKFs) {
             if (!pKFi || pKFi->isBad()) {
+                // std::cerr << "Bad KF in correction" << std::endl;
                 continue;
             }
 
-            pKFi->mTcwBefMerge = pKFi->GetPose();        
-            pKFi->mTwcBefMerge = pKFi->GetPoseInverse(); 
+            // std::cerr << "KF id: " << pKFi->mnId << std::endl;
+
+            pKFi->mTcwBefMerge = pKFi->GetPose();        // mTcw Before Merge
+            pKFi->mTwcBefMerge = pKFi->GetPoseInverse(); // mTwc Before Merge
+            // 将关键帧的Pose更新为Merge Map坐标系下的Pose
             pKFi->SetPose(pKFi->mTcwMerge);
 
+            // Make sure connections are updated
+            // 将关键帧添加到Merge Map中，并从Active Map中删去
             pKFi->UpdateMap(pMainMap);
             pKFi->mnMergeCorrectedForKF = pRandMergedKF->mnId;
             pMainMap->AddKeyFrame(pKFi);
             pMergedMap->EraseKeyFrame(pKFi);
         }
 
+        // 更新Active Map中所有的Map Point
+        // 注意，到此MapPoint都不用管重复的问题，都是直接Sim3变换得到结果
         for (MapPoint *pMPi : spMergedMapWindowMPs) {
-            if (!pMPi || pMPi->isBad()) {
+            if (!pMPi || pMPi->isBad())
                 continue;
-            }
 
+            // 将MapPoint的坐标更新为Merge Map坐标系下的坐标
             pMPi->SetWorldPos(pMPi->mPosMerge);
             pMPi->SetNormalVector(pMPi->mNormalVectorMerge);
+            // 将MapPoint添加到Merge Map中，并从Active Map中删去
             pMPi->UpdateMap(pMainMap);
             pMainMap->AddMapPoint(pMPi);
             pMergedMap->EraseMapPoint(pMPi);
         }
 
         pMainMap->IncreaseChangeIndex();
+        // TODO for debug
+        //         pMainMap->ChangeId(pMergedMap->GetId());
 
         std::cerr << "[Merge]: merging maps finished" << std::endl;
+        // @note 添加Merged Map Id到Main Map中
         pMainMap->mvMergedMapIds.push_back(pMergedMap->GetId());
     }
 
+    // ***************** 前面完成Welding Window的迁移后，构建新的Essential Graph *****************
+    // 在Active Map中，Welding window外的关键帧、MapPoint目前都还没有迁移过来
+    // Rebuild the essential graph in the local window
+    // 下面在拓展树中父子颠倒的操作是什么意思？
+    // @note 颠倒拓展树
     KeyFrame *pNewChild;
     KeyFrame *pNewParent;
     pMergedMap->GetOriginKF()->SetFirstConnection(false);
-    pNewChild = pRandMergedKF->GetParent(); 
-    pNewParent = pRandMergedKF;             
+    pNewChild = pRandMergedKF->GetParent(); // Old parent, it will be the new child of this KF
+    pNewParent = pRandMergedKF;             // Old child, now it will be the parent of its own parent(we need eliminate this KF from children list in its old parent)
     pRandMergedKF->ChangeParent(pRandMainKF);
-    while (pNewChild) 
+    while (pNewChild) // TODO Bug 会卡在这里
     {
-        pNewChild->EraseChild(pNewParent); 
+        pNewChild->EraseChild(pNewParent); // We remove the relation between the old parent and the new for avoid loop
         KeyFrame *pOldParent = pNewChild->GetParent();
 
         pNewChild->ChangeParent(pNewParent);
@@ -1732,19 +1896,31 @@ void CloudMerging::CloudMergeMap(
         pNewChild = pOldParent;
     }
 
+    // Update the connections between the local window
+    //  ***************** Active Map中的Map Point虽然迁移到Merge Map了，但是没看到添加observation，这样update不应该有效 *****************
     pRandMainKF->UpdateConnections();
 
+    // Project MapPoints observed in the neighborhood of the merge keyframe
+    // into the current keyframe and neighbors using corrected poses.
+    // Fuse duplications.
+    // ***************** 第七步，进行Map Point的融合去重 *****************
+    // @note SearchAndFuse
+    // std::cerr << "[Merge]: start fuse points" << std::endl;
+    // 原来的SearchAndFuse是有添加observations功能的，但因为我们CloudMap没有描述子，因此不用它
+    // SearchAndFuse(vCorrectedSim3, vpCheckFuseMapPoint);
+    // std::cerr << "[Merge]: fuse points finished" << std::endl;
+
+    // Update connectivity
+    // 在Map Point的Observation更新完成后，共视图的更新就有效了
     for (KeyFrame *pKFi : spMergedMapWindowKFs) {
-        if (!pKFi || pKFi->isBad()) {
+        if (!pKFi || pKFi->isBad())
             continue;
-        }
 
         pKFi->UpdateConnections();
     }
     for (KeyFrame *pKFi : spMainMapWindowKFs) {
-        if (!pKFi || pKFi->isBad()) {
+        if (!pKFi || pKFi->isBad())
             continue;
-        }
 
         pKFi->UpdateConnections();
     }
@@ -1756,15 +1932,12 @@ void CloudMerging::CloudMergeMap(
     vector<KeyFrame *> vpMainMapKFs;
     std::copy(spMergedMapWindowKFs.begin(), spMergedMapWindowKFs.end(), std::back_inserter(vpMergedMapWindowKFs));
     std::copy(spMainMapWindowKFs.begin(), spMainMapWindowKFs.end(), std::back_inserter(vpMainMapKFs));
-    
-    // 【核心修复 2：彻底切断 Welding Local Bundle Adjustment】使用参数 bOldUdf 和 bNewUdf
-    if (bOldUdf || bNewUdf) {
-        std::cerr << "\033[1;32m[UDF BYPASS] Skipping Welding Local Bundle Adjustment (Visual BA is invalid for UDF).\033[0m" << std::endl;
-    } else {
-        std::cerr << "[Merge]: Local bundle adjustment, spLocalWindowKFs size: " << spMergedMapWindowKFs.size() << std::endl;
-        std::cerr << "[Merge]: Local bundle adjustment, spMergeConnectedKFs size: " << spMainMapWindowKFs.size() << std::endl;
-        Optimizer::LocalBundleAdjustment(pRandMergedKF, vpMergedMapWindowKFs, vpMainMapKFs, &bStop);
-    }
+    std::cerr << "[Merge]: Local bundle adjustment, spLocalWindowKFs size: " << spMergedMapWindowKFs.size() << std::endl;
+    std::cerr << "[Merge]: Local bundle adjustment, spMergeConnectedKFs size: " << spMainMapWindowKFs.size() << std::endl;
+
+    // 和Local Map线程中利用Local Map进行Local BA保持一致
+    // @note LocalBA
+    Optimizer::LocalBundleAdjustment(pRandMergedKF, vpMergedMapWindowKFs, vpMainMapKFs, &bStop);
 
     std::cerr << "[Merge]: Welding bundle adjustment finished" << std::endl;
 
@@ -1772,13 +1945,18 @@ void CloudMerging::CloudMergeMap(
         pLocalMapper->Release();
     }
 
+    // ***************** 第八步，将Welding window外的原Active Map的关键帧、Map Point迁移到Merged map *****************
+    // Update the non critical area from the current map to the merged map
+    // 取出原Active Map的所有剩下的关键帧、Map points（Welding window内的都已经迁移过去了）
     vector<KeyFrame *> vpCurrentMergedMapKFs = pMergedMap->GetAllKeyFrames();
     vector<MapPoint *> vpCurrentMergedMapMPs = pMergedMap->GetAllMapPoints();
 
     if (vpCurrentMergedMapKFs.size() == 0) {
     } else {
+        // ***************** 和Welding window的迁移一致，先计算关键帧、再计算MapPoint，更新它们在Merged Map中的信息 *****************
         {
-            unique_lock<mutex> currentLock(pMergedMap->mMutexMapUpdate); 
+            unique_lock<mutex> currentLock(
+                pMergedMap->mMutexMapUpdate); // We update the current map with the Merge information
 
             for (KeyFrame *pKFi : vpCurrentMergedMapKFs) {
                 if (!pKFi || pKFi->isBad() || pKFi->GetMap() != pMergedMap) {
@@ -1789,13 +1967,15 @@ void CloudMerging::CloudMergeMap(
 
                 Sophus::SE3d Tiw = (pKFi->GetPose()).cast<double>();
                 g2o::Sim3 g2oSiw(Tiw.unit_quaternion(), Tiw.translation(), 1.0);
-                vNonCorrectedSim3[pKFi] = g2oSiw; 
+                // Pose without correction
+                vNonCorrectedSim3[pKFi] = g2oSiw; // 更新vNonCorrectedSim3
 
                 Sophus::SE3d Tic = Tiw * Twc;
                 g2o::Sim3 g2oSim(Tic.unit_quaternion(), Tic.translation(), 1.0);
                 g2oCorrectedSiw = g2oSim * gSMergedCameraMainWorld;
-                vCorrectedSim3[pKFi] = g2oCorrectedSiw; 
+                vCorrectedSim3[pKFi] = g2oCorrectedSiw; // 更新vCorrectedSim3
 
+                // Update keyframe pose with corrected Sim3. First transform Sim3 to SE3 (scale translation)
                 double s = g2oCorrectedSiw.scale();
 
                 pKFi->mfScale = s;
@@ -1808,14 +1988,14 @@ void CloudMerging::CloudMergeMap(
                 pKFi->SetPose(correctedTiw.cast<float>());
             }
             for (MapPoint *pMPi : vpCurrentMergedMapMPs) {
-                if (!pMPi || pMPi->isBad() || pMPi->GetMap() != pMergedMap) {
+                if (!pMPi || pMPi->isBad() || pMPi->GetMap() != pMergedMap)
                     continue;
-                }
 
                 KeyFrame *pKFref = pMPi->GetReferenceKeyFrame();
                 g2o::Sim3 g2oCorrectedSwi = vCorrectedSim3[pKFref].inverse();
                 g2o::Sim3 g2oNonCorrectedSiw = vNonCorrectedSim3[pKFref];
 
+                // Project with non-corrected pose and project back with corrected pose
                 Eigen::Vector3d P3Dw = pMPi->GetWorldPos().cast<double>();
                 Eigen::Vector3d eigCorrectedP3Dw = g2oCorrectedSwi.map(g2oNonCorrectedSiw.map(P3Dw));
                 pMPi->SetWorldPos(eigCorrectedP3Dw.cast<float>());
@@ -1825,30 +2005,36 @@ void CloudMerging::CloudMergeMap(
         }
 
         if (blockLocalMapper) {
+            // 再次请求暂停Local Map线程，等待Local Map线程结束
             pLocalMapper->RequestStop();
+            // Wait until Local Mapping has effectively stopped
             while (!pLocalMapper->isStopped()) {
                 usleep(1000);
             }
         }
 
         {
-            unique_lock<mutex> currentLock(pMergedMap->mMutexMapUpdate); 
-            unique_lock<mutex> mergeLock(pMainMap->mMutexMapUpdate);     
+            // ***************** 将剩下所有关键帧、Map Point迁移过去，但是不进行Local BA，而是放进去之后等待Global BA慢慢进行更新 *****************
+            // Get Merge Map Mutex
+            unique_lock<mutex> currentLock(pMergedMap->mMutexMapUpdate); // We update the current map with the Merge information
+            unique_lock<mutex> mergeLock(pMainMap->mMutexMapUpdate);     // We remove the Kfs and MPs in the merged area from the old map
 
+            // std::cerr << "Merge outside KFs: " << vpCurrentMapKFs.size() << std::endl;
             for (KeyFrame *pKFi : vpCurrentMergedMapKFs) {
                 if (!pKFi || pKFi->isBad() || pKFi->GetMap() != pMergedMap) {
                     continue;
                 }
+                // std::cerr << "KF id: " << pKFi->mnId << std::endl;
 
+                // Make sure connections are updated
                 pKFi->UpdateMap(pMainMap);
                 pMainMap->AddKeyFrame(pKFi);
                 pMergedMap->EraseKeyFrame(pKFi);
             }
 
             for (MapPoint *pMPi : vpCurrentMergedMapMPs) {
-                if (!pMPi || pMPi->isBad()) {
+                if (!pMPi || pMPi->isBad())
                     continue;
-                }
 
                 pMPi->UpdateMap(pMainMap);
                 pMainMap->AddMapPoint(pMPi);
@@ -1901,6 +2087,8 @@ void CloudMerging::SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vecto
 
     int total_replaces = 0;
 
+    // cerr << "[FUSE]: Initially there are " << vpMapPoints.size() << " MPs" << endl;
+    // cerr << "FUSE: Intially there are " << CorrectedPosesMap.size() << " KFs" << endl;
     for (KeyFrameAndPose::const_iterator mit = CorrectedPosesMap.begin(), mend = CorrectedPosesMap.end(); mit != mend; mit++) {
         int num_replaces = 0;
         KeyFrame *pKFi = mit->first;
@@ -1910,8 +2098,9 @@ void CloudMerging::SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vecto
         Sophus::Sim3f Scw = Converter::toSophus(g2oScw);
 
         vector<MapPoint *> vpReplacePoints(vpMapPoints.size(), static_cast<MapPoint *>(NULL));
-        int numFused = matcher.Fuse(pKFi, Scw, vpMapPoints, 4, vpReplacePoints); 
+        int numFused = matcher.Fuse(pKFi, Scw, vpMapPoints, 4, vpReplacePoints); // Fuse中会为Map Point添加Observation
 
+        // Get Map Mutex
         unique_lock<mutex> lock(pMap->mMutexMapUpdate);
         const int nLP = vpMapPoints.size();
         for (int i = 0; i < nLP; i++) {
@@ -1924,6 +2113,7 @@ void CloudMerging::SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vecto
 
         total_replaces += num_replaces;
     }
+    // cerr << "[FUSE]: " << total_replaces << " MPs had been fused" << endl;
 }
 
 void CloudMerging::SearchAndFuse(const vector<KeyFrame *> &vConectedKFs, vector<MapPoint *> &vpMapPoints) {
@@ -1931,6 +2121,8 @@ void CloudMerging::SearchAndFuse(const vector<KeyFrame *> &vConectedKFs, vector<
 
     int total_replaces = 0;
 
+    // cerr << "FUSE-POSE: Initially there are " << vpMapPoints.size() << " MPs" << endl;
+    // cerr << "FUSE-POSE: Intially there are " << vConectedKFs.size() << " KFs" << endl;
     for (auto mit = vConectedKFs.begin(), mend = vConectedKFs.end(); mit != mend; mit++) {
         int num_replaces = 0;
         KeyFrame *pKF = (*mit);
@@ -1938,10 +2130,14 @@ void CloudMerging::SearchAndFuse(const vector<KeyFrame *> &vConectedKFs, vector<
         Sophus::SE3f Tcw = pKF->GetPose();
         Sophus::Sim3f Scw(Tcw.unit_quaternion(), Tcw.translation());
         Scw.setScale(1.f);
-        
+        /*std::cerr << "These should be zeros: " <<
+            Scw.rotationMatrix() - Tcw.rotationMatrix() << std::endl <<
+            Scw.translation() - Tcw.translation() << std::endl <<
+            Scw.scale() - 1.f << std::endl;*/
         vector<MapPoint *> vpReplacePoints(vpMapPoints.size(), static_cast<MapPoint *>(NULL));
         matcher.Fuse(pKF, Scw, vpMapPoints, 4, vpReplacePoints);
 
+        // Get Map Mutex
         unique_lock<mutex> lock(pMap->mMutexMapUpdate);
         const int nLP = vpMapPoints.size();
         for (int i = 0; i < nLP; i++) {
@@ -1951,7 +2147,10 @@ void CloudMerging::SearchAndFuse(const vector<KeyFrame *> &vConectedKFs, vector<
                 pRep->Replace(vpMapPoints[i]);
             }
         }
+        /*cerr << "FUSE-POSE: KF " << pKF->mnId << " ->" << num_replaces << " MPs fused" << endl;
+        total_replaces += num_replaces;*/
     }
+    // cerr << "FUSE-POSE: " << total_replaces << " MPs had been fused" << endl;
 }
 
 void CloudMerging::RequestReset() {
@@ -1963,9 +2162,8 @@ void CloudMerging::RequestReset() {
     while (1) {
         {
             unique_lock<mutex> lock2(mMutexReset);
-            if (!mbResetRequested) {
+            if (!mbResetRequested)
                 break;
-            }
         }
         usleep(5000);
     }
@@ -1981,23 +2179,45 @@ void CloudMerging::RequestResetActiveMap(Map *pMap) {
     while (1) {
         {
             unique_lock<mutex> lock2(mMutexReset);
-            if (!mbResetActiveMapRequested) {
+            if (!mbResetActiveMapRequested)
                 break;
-            }
         }
         usleep(3000);
     }
 }
 
 void CloudMerging::ResetIfRequested() {
-
+    //    // TODO need to change
+    //    unique_lock<mutex> lock(mMutexReset);
+    //    if(mbResetRequested)
+    //    {
+    //        cerr << "Loop closer reset requested..." << endl;
+    //        mlpCloudMapQueue.clear();
+    //        mLastLoopKFid=0;  //TODO old variable, it is not use in the new algorithm
+    //        mbResetRequested=false;
+    //        mbResetActiveMapRequested = false;
+    //    }
+    //    else if(mbResetActiveMapRequested)
+    //    {
+    //
+    //        for (list<KeyFrame*>::const_iterator it=mlpCloudMapQueue.begin(); it != mlpCloudMapQueue.end();)
+    //        {
+    //            KeyFrame* pKFi = *it;
+    //            if(pKFi->GetMap() == mpMapToReset)
+    //            {
+    //                it = mlpCloudMapQueue.erase(it);
+    //            }
+    //            else
+    //                ++it;
+    //        }
+    //
+    //        mLastLoopKFid=mpAtlas->GetLastInitKFid(); //TODO old variable, it is not use in the new algorithm
+    //        mbResetActiveMapRequested=false;
+    //
+    //    }
 }
 
 void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoopKF) {
-    mbFinishedGBA = true;
-    mbRunningGBA = false;
-    return; 
-    
     Verbose::PrintMess("Starting Global Bundle Adjustment", Verbose::VERBOSITY_NORMAL);
 
 #ifdef REGISTER_TIMES
@@ -2011,11 +2231,10 @@ void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoo
 
     const bool bImuInit = pActiveMap->isImuInitialized();
 
-    if (!bImuInit) {
+    if (!bImuInit)
         Optimizer::GlobalBundleAdjustemnt(pActiveMap, 10, &mbStopGBA, nLoopKF, false);
-    } else {
+    else
         Optimizer::FullInertialBA(pActiveMap, 7, false, nLoopKF, &mbStopGBA);
-    }
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_EndGBA = std::chrono::steady_clock::now();
@@ -2029,55 +2248,67 @@ void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoo
 #endif
 
     int idx = mnFullBAIdx;
-    
+    // Optimizer::GlobalBundleAdjustemnt(mpMap,10,&mbStopGBA,nLoopKF,false);
+
+    // Update all MapPoints and KeyFrames
+    // Local Mapping was active during BA, that means that there might be new keyframes
+    // not included in the Global BA and they are not consistent with the updated map.
+    // We need to propagate the correction through the spanning tree
     {
         unique_lock<mutex> lock(mMutexGBA);
-        if (idx != mnFullBAIdx) {
+        if (idx != mnFullBAIdx)
             return;
-        }
 
-        if (!bImuInit && pActiveMap->isImuInitialized()) {
+        if (!bImuInit && pActiveMap->isImuInitialized())
             return;
-        }
 
         if (!mbStopGBA) {
             Verbose::PrintMess("Global Bundle Adjustment finished", Verbose::VERBOSITY_NORMAL);
             Verbose::PrintMess("Updating map ...", Verbose::VERBOSITY_NORMAL);
 
             mpLocalMapper->RequestStop();
+            // Wait until Local Mapping has effectively stopped
 
             while (!mpLocalMapper->isStopped() && !mpLocalMapper->isFinished()) {
                 usleep(1000);
             }
 
+            // Get Map Mutex
             unique_lock<mutex> lock(pActiveMap->mMutexMapUpdate);
-            
+            // cerr << "LC: Update Map Mutex adquired" << endl;
+
+            // pActiveMap->PrintEssentialGraph();
+            //  Correct keyframes starting at map first keyframe
             list<KeyFrame *> lpKFtoCheck(pActiveMap->mvpKeyFrameOrigins.begin(), pActiveMap->mvpKeyFrameOrigins.end());
 
             while (!lpKFtoCheck.empty()) {
                 KeyFrame *pKF = lpKFtoCheck.front();
                 const set<KeyFrame *> sChilds = pKF->GetChilds();
-                
+                // cerr << "---Updating KF " << pKF->mnId << " with " << sChilds.size() << " childs" << endl;
+                // cerr << " KF mnBAGlobalForKF: " << pKF->mnBAGlobalForKF << endl;
                 Sophus::SE3f Twc = pKF->GetPoseInverse();
-                
+                // cerr << "Twc: " << Twc << endl;
+                // cerr << "GBA: Correct KeyFrames" << endl;
                 for (set<KeyFrame *>::const_iterator sit = sChilds.begin(); sit != sChilds.end(); sit++) {
                     KeyFrame *pChild = *sit;
-                    if (!pChild || pChild->isBad()) {
+                    if (!pChild || pChild->isBad())
                         continue;
-                    }
 
                     if (pChild->mnBAGlobalForKF != nLoopKF) {
+                        // cerr << "++++New child with flag " << pChild->mnBAGlobalForKF << "; LoopKF: " << nLoopKF << endl;
+                        // cerr << " child id: " << pChild->mnId << endl;
                         Sophus::SE3f Tchildc = pChild->GetPose() * Twc;
-                        
-                        pChild->mTcwGBA = Tchildc * pKF->mTcwGBA; 
+                        // cerr << "Child pose: " << Tchildc << endl;
+                        // cerr << "pKF->mTcwGBA: " << pKF->mTcwGBA << endl;
+                        pChild->mTcwGBA = Tchildc * pKF->mTcwGBA; //*Tcorc*pKF->mTcwGBA;
 
                         Sophus::SO3f Rcor = pChild->mTcwGBA.so3().inverse() * pChild->GetPose().so3();
                         if (pChild->isVelocitySet()) {
                             pChild->mVwbGBA = Rcor * pChild->GetVelocity();
-                        } else {
+                        } else
                             Verbose::PrintMess("Child velocity empty!! ", Verbose::VERBOSITY_NORMAL);
-                        }
 
+                        // cerr << "Child bias: " << pChild->GetImuBias() << endl;
                         pChild->mBiasGBA = pChild->GetImuBias();
 
                         pChild->mnBAGlobalForKF = nLoopKF;
@@ -2085,13 +2316,70 @@ void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoo
                     lpKFtoCheck.push_back(pChild);
                 }
 
+                // cerr << "-------Update pose" << endl;
                 pKF->mTcwBefGBA = pKF->GetPose();
-                
+                // cerr << "pKF->mTcwBefGBA: " << pKF->mTcwBefGBA << endl;
                 pKF->SetPose(pKF->mTcwGBA);
-                
+                /*cv::Mat Tco_cn = pKF->mTcwBefGBA * pKF->mTcwGBA.inv();
+                cv::Vec3d trasl = Tco_cn.rowRange(0,3).col(3);
+                double dist = cv::norm(trasl);
+                cerr << "GBA: KF " << pKF->mnId << " had been moved " << dist << " meters" << endl;
+                double desvX = 0;
+                double desvY = 0;
+                double desvZ = 0;
+                if(pKF->mbHasHessian)
+                {
+                    cv::Mat hessianInv = pKF->mHessianPose.inv();
+
+                    double covX = hessianInv.at<double>(3,3);
+                    desvX = std::sqrt(covX);
+                    double covY = hessianInv.at<double>(4,4);
+                    desvY = std::sqrt(covY);
+                    double covZ = hessianInv.at<double>(5,5);
+                    desvZ = std::sqrt(covZ);
+                    pKF->mbHasHessian = false;
+                }
+                if(dist > 1)
+                {
+                    cerr << "--To much distance correction: It has " << pKF->GetConnectedKeyFrames().size() << " connected KFs" << endl;
+                    cerr << "--It has " << pKF->GetCovisiblesByWeight(80).size() << " connected KF with 80 common matches or more" << endl;
+                    cerr << "--It has " << pKF->GetCovisiblesByWeight(50).size() << " connected KF with 50 common matches or more" << endl;
+                    cerr << "--It has " << pKF->GetCovisiblesByWeight(20).size() << " connected KF with 20 common matches or more" << endl;
+
+                    cerr << "--STD in meters(x, y, z): " << desvX << ", " << desvY << ", " << desvZ << endl;
+
+
+                    string strNameFile = pKF->mNameFile;
+                    cv::Mat imLeft = cv::imread(strNameFile, CV_LOAD_IMAGE_UNCHANGED);
+
+                    cv::cvtColor(imLeft, imLeft, CV_GRAY2BGR);
+
+                    vector<MapPoint*> vpMapPointsKF = pKF->GetMapPointMatches();
+                    int num_MPs = 0;
+                    for(int i=0; i<vpMapPointsKF.size(); ++i)
+                    {
+                        if(!vpMapPointsKF[i] || vpMapPointsKF[i]->isBad())
+                        {
+                            continue;
+                        }
+                        num_MPs += 1;
+                        string strNumOBs = to_string(vpMapPointsKF[i]->Observations());
+                        cv::circle(imLeft, pKF->mvKeys[i].pt, 2, cv::Scalar(0, 255, 0));
+                        cv::putText(imLeft, strNumOBs, pKF->mvKeys[i].pt, CV_FONT_HERSHEY_DUPLEX, 1, cv::Scalar(255, 0, 0));
+                    }
+                    cerr << "--It has " << num_MPs << " MPs matched in the map" << endl;
+
+                    string namefile = "./test_GBA/GBA_" + to_string(nLoopKF) + "_KF" + to_string(pKF->mnId) +"_D" + to_string(dist) +".png";
+                    cv::imwrite(namefile, imLeft);
+                }*/
+
                 if (pKF->bImu) {
+                    // cerr << "-------Update inertial values" << endl;
                     pKF->mVwbBefGBA = pKF->GetVelocity();
-                    
+                    // if (pKF->mVwbGBA.empty())
+                    //     Verbose::PrintMess("pKF->mVwbGBA is empty", Verbose::VERBOSITY_NORMAL);
+
+                    // assert(!pKF->mVwbGBA.empty());
                     pKF->SetVelocity(pKF->mVwbGBA);
                     pKF->SetNewBias(pKF->mBiasGBA);
                 }
@@ -2099,32 +2387,44 @@ void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoo
                 lpKFtoCheck.pop_front();
             }
 
+            // cerr << "GBA: Correct MapPoints" << endl;
+            //  Correct MapPoints
             const vector<MapPoint *> vpMPs = pActiveMap->GetAllMapPoints();
 
             for (size_t i = 0; i < vpMPs.size(); i++) {
                 MapPoint *pMP = vpMPs[i];
 
-                if (pMP->isBad()) {
+                if (pMP->isBad())
                     continue;
-                }
 
                 if (pMP->mnBAGlobalForKF == nLoopKF) {
+                    // If optimized by Global BA, just update
                     pMP->SetWorldPos(pMP->mPosGBA);
                 } else {
+                    // Update according to the correction of its reference keyframe
                     KeyFrame *pRefKF = pMP->GetReferenceKeyFrame();
 
-                    if (pRefKF->mnBAGlobalForKF != nLoopKF) {
+                    if (pRefKF->mnBAGlobalForKF != nLoopKF)
                         continue;
-                    }
 
+                    /*if(pRefKF->mTcwBefGBA.empty())
+                        continue;*/
+
+                    // Map to non-corrected camera
+                    // cv::Mat Rcw = pRefKF->mTcwBefGBA.rowRange(0,3).colRange(0,3);
+                    // cv::Mat tcw = pRefKF->mTcwBefGBA.rowRange(0,3).col(3);
                     Eigen::Vector3f Xc = pRefKF->mTcwBefGBA * pMP->GetWorldPos();
 
+                    // Backproject using corrected camera
                     pMP->SetWorldPos(pRefKF->GetPoseInverse() * Xc);
                 }
             }
 
             pActiveMap->InformNewBigChange();
             pActiveMap->IncreaseChangeIndex();
+
+            // TODO Check this update
+            // mpTracker->UpdateFrameIMU(1.0f, mpTracker->GetLastKeyFrame()->GetImuBias(), mpTracker->GetLastKeyFrame());
 
             mpLocalMapper->Release();
 
@@ -2147,6 +2447,7 @@ void CloudMerging::RunGlobalBundleAdjustment(Map *pActiveMap, unsigned long nLoo
 
 void CloudMerging::RequestFinish() {
     unique_lock<mutex> lock(mMutexFinish);
+    // cerr << "LC: Finish requested" << endl;
     mbFinishRequested = true;
 }
 
@@ -2181,4 +2482,4 @@ Map *CloudMerging::GetCloudMap() {
     return mpCurrentCloudMap;
 }
 
-}
+} // namespace ORB_SLAM3

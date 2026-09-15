@@ -25,8 +25,11 @@
 
 namespace ORB_SLAM3 {
 
-Atlas::Atlas() {
-    mpCurrentMap = static_cast<Map *>(NULL);
+Atlas::Atlas() :
+    mpCurrentMap(static_cast<Map *>(NULL)),
+    mnLastInitKFidMap(0),
+    mpViewer(static_cast<Viewer *>(NULL)),
+    mHasViewer(false) {
 }
 
 Atlas::Atlas(int initKFid) :
@@ -50,7 +53,11 @@ Atlas::~Atlas() {
 }
 
 void Atlas::ClearOldMapImages() {
-    auto vpMaps = vector<Map *>(mspMaps.begin(), mspMaps.end());
+    vector<Map *> vpMaps;
+    {
+        unique_lock<mutex> lock(mMutexAtlas);
+        vpMaps.assign(mspMaps.begin(), mspMaps.end());
+    }
     if (vpMaps.size() > 2) {
         for (auto iterpMap = vpMaps.begin(); iterpMap != (vpMaps.end() - 2); iterpMap++) {
             (*iterpMap)->ClearKeyframeImages();
@@ -60,6 +67,10 @@ void Atlas::ClearOldMapImages() {
 
 void Atlas::CreateNewMap() {
     unique_lock<mutex> lock(mMutexAtlas);
+    CreateNewMapLocked();
+}
+
+void Atlas::CreateNewMapLocked() {
     cout << "Creation of new map with id: " << Map::nNextId << endl;
     if (mpCurrentMap) {
         if (!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
@@ -82,6 +93,13 @@ void Atlas::CreateNewMap() {
 
 void Atlas::ChangeMap(Map *pMap) {
     unique_lock<mutex> lock(mMutexAtlas);
+    ChangeMapLocked(pMap);
+}
+
+void Atlas::ChangeMapLocked(Map *pMap) {
+    if (pMap == nullptr) {
+        return;
+    }
     cout << "Change to map with id: " << pMap->GetId() << endl;
     if (mpCurrentMap) {
         mpCurrentMap->SetStoredMap();
@@ -89,6 +107,45 @@ void Atlas::ChangeMap(Map *pMap) {
 
     mpCurrentMap = pMap;
     mpCurrentMap->SetCurrentMap();
+}
+
+void Atlas::ChangeMapId(Map *pMap, unsigned long newId) {
+    if (pMap == nullptr) {
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexAtlas);
+    pMap->ChangeId(newId);
+}
+
+void Atlas::AddMergedMapId(Map *pMap, unsigned long id) {
+    if (pMap == nullptr) {
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexAtlas);
+    pMap->AddMergedMapId(id);
+}
+
+void Atlas::CommitMergedMapIdentityHandoff(
+    Map *pRetainedMap,
+    Map *pMergedMap,
+    unsigned long previousRetainedId,
+    unsigned long inheritedId) {
+    if (pRetainedMap == nullptr || pMergedMap == nullptr ||
+        pRetainedMap == pMergedMap) {
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexAtlas);
+    pRetainedMap->PreserveMergedMapIdentity(
+        previousRetainedId,
+        inheritedId);
+    if (mpCurrentMap == pMergedMap) {
+        ChangeMapLocked(pRetainedMap);
+    }
+    SetMapBadLocked(pMergedMap);
+    RemoveBadMapsLocked();
 }
 
 void Atlas::InsertNewMap(Map *pMap) {
@@ -244,8 +301,9 @@ void Atlas::clearAtlas() {
 
 Map *Atlas::GetCurrentMap() {
     unique_lock<mutex> lock(mMutexAtlas);
-    if (!mpCurrentMap)
-        CreateNewMap();
+    if (!mpCurrentMap) {
+        CreateNewMapLocked();
+    }
     while (mpCurrentMap->IsBad()) {
         usleep(3000);
         cerr << "Atlas: current map is bad" << endl;
@@ -269,19 +327,18 @@ Map *Atlas::GetSpecifyMap(int mnId) {
     unique_lock<mutex> lock(mMutexAtlas); 
     
     Map *resultMap = nullptr;
-    
-    // 精准匹配
+
+    // Precise current identity always wins over every historical alias.
     for (Map *pMap_i : mspMaps) {
-        int p_mnId = pMap_i->GetId();
-        if (mnId == p_mnId) {
+        if (pMap_i->GetId() == static_cast<unsigned long>(mnId)) {
             resultMap = pMap_i;
             return resultMap;
         }
     }
-    
-    // 在Merge中匹配
+
+    // Historical aliases are considered only after the complete exact-id pass.
     for (Map *pMap_i : mspMaps) {
-        if (count(pMap_i->mvMergedMapIds.begin(), pMap_i->mvMergedMapIds.end(), mnId)) {
+        if (pMap_i->HasMergedMapId(static_cast<unsigned long>(mnId))) {
             resultMap = pMap_i;
             return resultMap;
         }
@@ -329,6 +386,15 @@ Map *Atlas::GetDurationLongestMap() {
 }
 
 void Atlas::SetMapBad(Map *pMap) {
+    if (pMap == nullptr) {
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexAtlas);
+    SetMapBadLocked(pMap);
+}
+
+void Atlas::SetMapBadLocked(Map *pMap) {
     mspMaps.erase(pMap);
     pMap->SetBad();
 
@@ -336,6 +402,11 @@ void Atlas::SetMapBad(Map *pMap) {
 }
 
 void Atlas::RemoveBadMaps() {
+    unique_lock<mutex> lock(mMutexAtlas);
+    RemoveBadMapsLocked();
+}
+
+void Atlas::RemoveBadMapsLocked() {
     /*for(Map* pMap : mspBadMaps)
     {
         delete pMap;
@@ -365,9 +436,21 @@ bool Atlas::isImuInitialized() {
 }
 
 void Atlas::PreSave() {
-    if (mpCurrentMap) {
-        if (!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
-            mnLastInitKFidMap = mpCurrentMap->GetMaxKFid() + 1; //The init KF is the next of current maximum
+    std::set<GeometricCamera *> spCams;
+    {
+        unique_lock<mutex> lock(mMutexAtlas);
+        if (mpCurrentMap) {
+            if (!mspMaps.empty() &&
+                mnLastInitKFidMap < mpCurrentMap->GetMaxKFid()) {
+                mnLastInitKFidMap = mpCurrentMap->GetMaxKFid() + 1;
+            }
+        }
+        mvpBackupMaps.clear();
+        std::copy(
+            mspMaps.begin(),
+            mspMaps.end(),
+            std::back_inserter(mvpBackupMaps));
+        spCams.insert(mvpCameras.begin(), mvpCameras.end());
     }
 
     struct compFunctor {
@@ -375,10 +458,7 @@ void Atlas::PreSave() {
             return elem1->GetId() < elem2->GetId();
         }
     };
-    std::copy(mspMaps.begin(), mspMaps.end(), std::back_inserter(mvpBackupMaps));
     sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
-
-    std::set<GeometricCamera *> spCams(mvpCameras.begin(), mvpCameras.end());
     for (Map *pMi : mvpBackupMaps) {
         if (!pMi || pMi->IsBad())
             continue;

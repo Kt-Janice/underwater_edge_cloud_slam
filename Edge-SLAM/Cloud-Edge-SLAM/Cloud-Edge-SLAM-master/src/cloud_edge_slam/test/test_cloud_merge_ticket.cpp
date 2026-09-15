@@ -62,5 +62,12 @@ TEST(CloudMergeTicketTest, WakesWaitingThread) {
     EXPECT_EQ(observed.outcome, CloudMergeOutcome::CANCELLED_SHUTDOWN);
 }
 
+TEST(CloudMergeTicketTest, ConvertsAirNotImplementedOutcomeToStableText) {
+    EXPECT_STREQ(
+        CloudMergeOutcomeToString(
+            CloudMergeOutcome::MERGE_NOT_IMPLEMENTED_AIR),
+        "MERGE_NOT_IMPLEMENTED_AIR");
+}
+
 }  // namespace
 }  // namespace ORB_SLAM3

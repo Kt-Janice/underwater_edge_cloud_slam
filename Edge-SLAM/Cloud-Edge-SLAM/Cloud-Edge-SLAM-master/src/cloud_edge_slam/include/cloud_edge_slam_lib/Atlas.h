@@ -79,6 +79,13 @@ public:
     void CreateNewMap();
     void ChangeMap(Map *pMap);
     void InsertNewMap(Map *pMap);
+    void ChangeMapId(Map *pMap, unsigned long newId);
+    void AddMergedMapId(Map *pMap, unsigned long id);
+    void CommitMergedMapIdentityHandoff(
+        Map *pRetainedMap,
+        Map *pMergedMap,
+        unsigned long previousRetainedId,
+        unsigned long inheritedId);
 
     unsigned long int GetLastInitKFid();
 
@@ -167,6 +174,12 @@ protected:
 
     // Mutex
     std::mutex mMutexAtlas;
+
+private:
+    void CreateNewMapLocked();
+    void ChangeMapLocked(Map *pMap);
+    void SetMapBadLocked(Map *pMap);
+    void RemoveBadMapsLocked();
 
 }; // class Atlas
 

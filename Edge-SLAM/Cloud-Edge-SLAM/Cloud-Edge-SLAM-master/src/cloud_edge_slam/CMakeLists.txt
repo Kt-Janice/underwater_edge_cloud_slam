@@ -498,6 +498,37 @@ if(TARGET test_cloud_merging_factory)
   target_link_libraries(test_cloud_merging_factory gtest_main cloud_edge_sla_lib)
 endif()
 
+catkin_add_gtest(
+  test_cloud_merging_land_air_contract
+  test/test_cloud_merging_land_air_contract.cpp)
+if(TARGET test_cloud_merging_land_air_contract)
+  target_compile_definitions(
+    test_cloud_merging_land_air_contract
+    PRIVATE
+    CLOUD_MERGING_SLA_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/lib_src/CloudMerging_SLA.cc")
+  target_link_libraries(
+    test_cloud_merging_land_air_contract
+    gtest_main)
+endif()
+
+catkin_add_gtest(
+  test_cloud_merging_land_geometry
+  test/test_cloud_merging_land_geometry.cpp)
+if(TARGET test_cloud_merging_land_geometry)
+  target_link_libraries(
+    test_cloud_merging_land_geometry
+    gtest_main
+    cloud_edge_sla_lib)
+endif()
+
+add_executable(
+  test_cloud_merge_outcome_ownership
+  test/test_cloud_merge_outcome_ownership.cpp)
+add_test(
+  NAME test_cloud_merge_outcome_ownership
+  COMMAND test_cloud_merge_outcome_ownership
+          ${CMAKE_CURRENT_SOURCE_DIR}/lib_src/CloudMerging_SLA.cc)
+
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)
 

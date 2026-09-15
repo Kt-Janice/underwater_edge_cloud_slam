@@ -21,6 +21,7 @@ enum class CloudMergeOutcome {
     MERGED_REPLAY_ABORTED_LOST,
     MERGED_REPLAY_ABORTED_SHUTDOWN,
     MERGE_COMPLETED_LAND_AIR,
+    MERGE_NOT_IMPLEMENTED_AIR,
     MERGE_SKIPPED_BACKEND_BLOCK,
     MERGE_SKIPPED_SIM3_FAILURE,
     MERGE_SKIPPED_EDGE_MAP_MISSING,
@@ -30,6 +31,8 @@ enum class CloudMergeOutcome {
     CANCELLED_SHUTDOWN,
     FAILED_EXCEPTION
 };
+
+const char *CloudMergeOutcomeToString(CloudMergeOutcome outcome);
 
 struct CloudMergeResult {
     std::uint64_t sequence = 0;

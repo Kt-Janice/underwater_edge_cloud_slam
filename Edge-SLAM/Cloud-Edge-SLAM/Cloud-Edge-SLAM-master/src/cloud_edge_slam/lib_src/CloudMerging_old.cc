@@ -302,6 +302,9 @@ void CloudMerging::Run(bool bOnline) { //bOnline = true
 
                 // Merge !!!
                 CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentCloudMap, mgSwEdgeFrontCloud, mpEdgeFrontCloudKeyFrameMatch, mvpEdgeFrontCloudMatchedKeyPoints, mpLocalMapper, true); //mgSwEdgeFrontCloud为求解得到的变换矩阵 mvpEdgeFrontCloudMatchedKeyPoints为uv匹配的关键点
+                mpAtlas->AddMergedMapId(
+                    mpCurrentEdgeFrontMap,
+                    mpCurrentCloudMap->GetId());
 
                 // Atlas删除没有的Map
                 mpAtlas->RemoveBadMaps();
@@ -449,19 +452,26 @@ void CloudMerging::Run(bool bOnline) { //bOnline = true
 
                     // Merge !!!
                     CloudMergeMap(mpCurrentEdgeFrontMap, mpCurrentEdgeBackMap, mgSwNewCloudEdgeBack, mpNewEdgeFrontEdgeBackKeyFrameMatch, mvpNewEdgeFrontEdgeBackMatchedKeyPoints, mpLocalMapper, true);
+                    mpAtlas->AddMergedMapId(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap->GetId());
 
                     // 改变Active Map为合并后的Map
                     // 旧的Map不会删除，但是会设置为Bad
                     delete mpCurrentCloudMap; // Cloud Map没有添加到Atlas里，所以不需要管，可以考虑直接delete掉清理内存
                     // @note EdgeFrontMap本身就在里面，不需要改变CurrentMap
-                    if (mpAtlas->GetCurrentMap() == mpCurrentEdgeBackMap) {
-                        mpAtlas->ChangeMap(mpCurrentEdgeFrontMap);
-                    }
-                    mpCurrentEdgeFrontMap->ChangeId(mpCurrentEdgeBackMap->GetId());
+                    const unsigned long previousEdgeFrontMapId =
+                        mpCurrentEdgeFrontMap->GetId();
+                    const unsigned long edgeBackMapId =
+                        mpCurrentEdgeBackMap->GetId();
+                    std::unique_lock<std::mutex> retainedMapLock(
+                        mpCurrentEdgeFrontMap->mMutexMapUpdate);
+                    mpAtlas->CommitMergedMapIdentityHandoff(
+                        mpCurrentEdgeFrontMap,
+                        mpCurrentEdgeBackMap,
+                        previousEdgeFrontMapId,
+                        edgeBackMapId);
                     mpCurrentEdgeFrontMap->ResetHaveMerged();
-
-                    mpAtlas->SetMapBad(mpCurrentEdgeBackMap);
-                    mpAtlas->RemoveBadMaps();
 
                     if (bRelaunchBA) {
                         // Launch a new thread to perform Global Bundle Adjustment
@@ -1959,7 +1969,6 @@ void CloudMerging::CloudMergeMap(
 
         std::cerr << "[Merge]: merging maps finished" << std::endl;
         // @note 添加Merged Map Id到Main Map中
-        pMainMap->mvMergedMapIds.push_back(pMergedMap->GetId());
     }
 
     // ***************** 前面完成Welding Window的迁移后，构建新的Essential Graph *****************
