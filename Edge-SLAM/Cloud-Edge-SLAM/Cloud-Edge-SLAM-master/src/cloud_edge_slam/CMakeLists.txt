@@ -391,6 +391,33 @@ target_link_libraries(cloud_edge_node
   ${OKVIS_LIB_PATH}/libokvis_time.a
   ${OKVIS_LIB_PATH}/libokvis_util.a
 )
+
+# BEGIN VISUAL_ONLY_FRONTEND_DIAGNOSTIC
+# Standalone visual-only diagnostic.
+# Temporary/removable.
+# Remove this whole BEGIN/END block together with the two diagnostic files
+# to completely remove this functionality.
+add_executable(visual_only_frontend_diagnostic
+  src/visual_only_frontend_diagnostic.cpp
+)
+target_include_directories(visual_only_frontend_diagnostic PRIVATE
+  ${catkin_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+)
+add_dependencies(visual_only_frontend_diagnostic
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(visual_only_frontend_diagnostic
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+  okvis_ros
+  okvis_kinematics
+  okvis_common
+  okvis_cv
+  okvis_time
+  okvis_util
+)
+# END VISUAL_ONLY_FRONTEND_DIAGNOSTIC
 #############
 ## Install ##
 #############

@@ -1,0 +1,14 @@
+<!-- Visual-only diagnostic only; outside the formal SVIn2/VIO runtime. -->
+<!-- Remove this file, its diagnostic source, and the marked CMake block to remove it. -->
+<launch>
+  <arg name="setting_path" default="$(find cloud_edge_slam)/config/davis.yaml" />
+  <arg name="image_topic" default="/davis_left/image_raw" />
+  <arg name="output_csv" default="/tmp/svin_visual_diagnostic.csv" />
+
+  <node pkg="cloud_edge_slam" type="visual_only_frontend_diagnostic"
+        name="svin_visual_diagnostic" output="screen" required="true">
+    <param name="setting_path" value="$(arg setting_path)" />
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="output_csv" value="$(arg output_csv)" />
+  </node>
+</launch>

@@ -3,6 +3,7 @@
 src/cloud_edge_slam/TestData
 src/cloud_edge_slam/Vocabulary/ORBvoc.txt
 src/cloud_edge_slam/results
+/src/cloud_edge_slam/result/
 
 devel/
 devel_debug/
